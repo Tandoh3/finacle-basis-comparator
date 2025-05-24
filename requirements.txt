@@ -1,4 +1,5 @@
 streamlit
 polars
-pandas 
+pandas
+openpyxl
 io
