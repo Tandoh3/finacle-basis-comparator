@@ -75,15 +75,15 @@ if basis_file and finacle_file:
 
         # Phone match logic (any-to-any)
         phone_match = (
-            basis["Phone_1"].is_in(finacle["Phone_1"]) |
-            basis["Phone_1"].is_in(finacle["Phone_2"]) |
-            basis["Phone_1"].is_in(finacle["Phone_3"]) |
-            basis["Phone_2"].is_in(finacle["Phone_1"]) |
-            basis["Phone_2"].is_in(finacle["Phone_2"]) |
-            basis["Phone_2"].is_in(finacle["Phone_3"]) |
-            basis["Phone_3"].is_in(finacle["Phone_1"]) |
-            basis["Phone_3"].is_in(finacle["Phone_2"]) |
-            basis["Phone_3"].is_in(finacle["Phone_3"])
+            basis["Phone_1"].isin(finacle["Phone_1"]) |
+            basis["Phone_1"].isin(finacle["Phone_2"]) |
+            basis["Phone_1"].isin(finacle["Phone_3"]) |
+            basis["Phone_2"].isin(finacle["Phone_1"]) |
+            basis["Phone_2"].isin(finacle["Phone_2"]) |
+            basis["Phone_2"].isin(finacle["Phone_3"]) |
+            basis["Phone_3"].isin(finacle["Phone_1"]) |
+            basis["Phone_3"].isin(finacle["Phone_2"]) |
+            basis["Phone_3"].isin(finacle["Phone_3"])
         )
 
         # Mismatch condition
