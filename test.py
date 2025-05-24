@@ -164,65 +164,69 @@ with col2:
     finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV/XLSX)", type=["csv", "xlsx"], key="finacle")
 
 # === 3. Processing Logic ===
+def process_uploaded_files(basis_file, finacle_file):
+    if basis_file and finacle_file:
+        try:
+            # Read files using Polars, explicitly setting dtype for 'PREFERREDPHONE' as Utf8
+            finacle_df = None
+            if finacle_file.name.endswith("xlsx"):
+                finacle_df = pl.read_excel(finacle_file)
+            else:
+                try:
+                    finacle_df = pl.read_csv(finacle_file, dtypes={"PREFERREDPHONE": pl.Utf8})
+                except Exception as e:
+                    st.error(f"Error reading CSV with explicit dtype: {e}")
+                    return
 
-if basis_file and finacle_file:
-    try:
-        # Read files using Polars, explicitly setting dtype for 'PREFERREDPHONE' as Utf8
-        finacle_df = None
-        if finacle_file.name.endswith("xlsx"):
-            finacle_df = pl.read_excel(finacle_file)
-        else:
-            try:
-                finacle_df = pl.read_csv(finacle_file, dtypes={"PREFERREDPHONE": pl.Utf8})
-            except Exception as e:
-                st.error(f"Error reading CSV with explicit dtype: {e}")
+            basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
+
+            if basis_df is None or finacle_df is None:
                 return
 
-        basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
+            st.subheader("📄 Uploaded Summary")
+            st.write(f"🔹 BASIS Rows: {basis_df.height}")
+            st.write(f"🔹 FINACLE Rows: {finacle_df.height}")
 
-        if basis_df is None or finacle_df is None:
-            return
+            # Preprocess the data
+            basis_processed = preprocess_basis(basis_df)
+            finacle_processed = preprocess_finacle(finacle_df)
 
-        st.subheader("📄 Uploaded Summary")
-        st.write(f"🔹 BASIS Rows: {basis_df.height}")
-        st.write(f"🔹 FINACLE Rows: {finacle_df.height}")
+            # Find fuzzy matches
+            matches_df, mismatches_df = find_fuzzy_matches(basis_processed, finacle_processed)
 
-        # Preprocess the data
-        basis_processed = preprocess_basis(basis_df)
-        finacle_processed = preprocess_finacle(finacle_df)
+            st.subheader("✅ Fuzzy Matches (Potential Same Person)")
+            if not matches_df.empty:
+                st.dataframe(matches_df, use_container_width=True)
+                output_matches = io.BytesIO()
+                with pd.ExcelWriter(output_matches, engine="openpyxl") as writer:
+                    matches_df.to_excel(writer, index=False, sheet_name="Fuzzy_Matches")
+                st.download_button(
+                    label="📥 Download Fuzzy Matches (Excel)",
+                    data=output_matches.getvalue(),
+                    file_name="fuzzy_matches.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.info("No fuzzy matches found based on the defined thresholds.")
 
-        # Find fuzzy matches
-        matches_df, mismatches_df = find_fuzzy_matches(basis_processed, finacle_processed)
+            st.subheader("💔 Mismatches (No Significant Fuzzy Match)")
+            if not mismatches_df.empty:
+                st.dataframe(mismatches_df, use_container_width=True)
+                output_mismatches = io.BytesIO()
+                with pd.ExcelWriter(output_mismatches, engine="openpyxl") as writer:
+                    mismatches_df.to_excel(writer, index=False, sheet_name="Mismatches")
+                st.download_button(
+                    label="📥 Download Mismatches (Excel)",
+                    data=output_mismatches.getvalue(),
+                    file_name="fuzzy_mismatches.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.info("No significant mismatches found.")
 
-        st.subheader("✅ Fuzzy Matches (Potential Same Person)")
-        if not matches_df.empty:
-            st.dataframe(matches_df, use_container_width=True)
-            output_matches = io.BytesIO()
-            with pd.ExcelWriter(output_matches, engine="openpyxl") as writer:
-                matches_df.to_excel(writer, index=False, sheet_name="Fuzzy_Matches")
-            st.download_button(
-                label="📥 Download Fuzzy Matches (Excel)",
-                data=output_matches.getvalue(),
-                file_name="fuzzy_matches.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("No fuzzy matches found based on the defined thresholds.")
+        except Exception as e:
+            st.error(f"❌ Error processing files: {e}")
 
-        st.subheader("💔 Mismatches (No Significant Fuzzy Match)")
-        if not mismatches_df.empty:
-            st.dataframe(mismatches_df, use_container_width=True)
-            output_mismatches = io.BytesIO()
-            with pd.ExcelWriter(output_mismatches, engine="openpyxl") as writer:
-                mismatches_df.to_excel(writer, index=False, sheet_name="Mismatches")
-            st.download_button(
-                label="📥 Download Mismatches (Excel)",
-                data=output_mismatches.getvalue(),
-                file_name="fuzzy_mismatches.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("No significant mismatches found.")
-
-    except Exception as e:
-        st.error(f"❌ Error processing files: {e}")
+# Call the processing function
+if basis_file and finacle_file:
+    process_uploaded_files(basis_file, finacle_file)
