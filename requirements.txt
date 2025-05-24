@@ -5,3 +5,4 @@ openpyxl
 dask
 duckdb
 thefuzz[speedup]
+fuzzywuzzy[speedup]
