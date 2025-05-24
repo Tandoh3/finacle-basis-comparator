@@ -227,4 +227,16 @@ if basis_file and finacle_file:
             df_mismatches = pd.DataFrame(mismatches)
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df_mismatches.to_excel(writer, index=False, sheet_name="
+                df_mismatches.to_excel(writer, index=False, sheet_name="Mismatches")
+            st.download_button(
+                label="📥 Download Mismatches Excel",
+                data=output.getvalue(),
+                file_name="basis_finacle_mismatches.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    except Exception as e:
+        st.error(f"Error processing files: {e}")
+
+else:
+    st.info("Please upload both Basis and Finacle files to start comparison.")
