@@ -4,7 +4,9 @@ import pandas as pd
 import io
 
 st.set_page_config(page_title="Finacle vs Basis Comparison Tool", layout="wide")
-st.title("📊 Finacle vs Basis Comparator (Row-wise Comparison)")
+st.title("📊 Finacle vs Basis Comparator (Large Dataset Support)")
+
+# === 1. Preprocessing Functions ===
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
@@ -15,25 +17,31 @@ def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
         "TEL_NUM_2": "Phone_2",
         "FAX_NUM": "Phone_3"
     })
-    # Keep needed columns and IDs
     return df.select([
         "BRA_CODE", "CUS_NUM", "Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"
     ])
 
 def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
+    # ======= DEBUG: Print columns to check exact names =======
+    st.write("Finacle Columns:", df.columns)
+
+    # Adjust these names to match your exact Finacle file column names (case-sensitive)
     df = df.rename({
-        "NAME": "Name",
+        "NAME": "Name",                   # <-- Change "NAME" if your column is different
         "PREFERREDEMAIL": "Email",
         "CUST_DOB": "Date_of_Birth",
         "PREFERREDPHONE": "Phone_1",
         "SMSBANKINGMOBILENUMBER": "Phone_2"
     })
+
+    # Add Phone_3 as empty string to align with Basis structure
     df = df.with_columns(pl.lit("").alias("Phone_3"))
     return df.select([
         "ORGKEY", "Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"
     ])
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
+    # Lowercase and strip string columns for consistent comparison
     for col in df.columns:
         if df[col].dtype == pl.Utf8:
             df = df.with_columns(
@@ -41,13 +49,7 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
             )
     return df
 
-def normalize_phones(df: pl.DataFrame) -> pl.DataFrame:
-    for col in ["Phone_1", "Phone_2", "Phone_3"]:
-        if col in df.columns:
-            df = df.with_columns(
-                pl.col(col).fill_null("").cast(pl.Utf8).str.strip_chars().alias(col)
-            )
-    return df
+# === 2. Upload Section ===
 
 col1, col2 = st.columns(2)
 with col1:
@@ -55,70 +57,108 @@ with col1:
 with col2:
     finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV/XLSX)", type=["csv", "xlsx"], key="finacle")
 
+# === 3. Processing Logic ===
+
 if basis_file and finacle_file:
     try:
-        # Read files
-        basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
-        finacle_df = pl.read_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.read_csv(finacle_file)
+        # Read files with polars
+        if basis_file.name.endswith("xlsx"):
+            basis_df = pl.read_excel(basis_file)
+        else:
+            basis_df = pl.read_csv(basis_file)
+
+        if finacle_file.name.endswith("xlsx"):
+            finacle_df = pl.read_excel(finacle_file)
+        else:
+            finacle_df = pl.read_csv(finacle_file)
 
         st.subheader("📄 Uploaded Summary")
         st.write(f"🔹 BASIS Rows: {basis_df.height}")
         st.write(f"🔹 FINACLE Rows: {finacle_df.height}")
 
-        # Preprocess & normalize
-        basis = normalize_phones(normalize(preprocess_basis(basis_df)))
-        finacle = normalize_phones(normalize(preprocess_finacle(finacle_df)))
+        # Preprocess and normalize
+        basis = normalize(preprocess_basis(basis_df))
+        finacle = normalize(preprocess_finacle(finacle_df))
 
-        # Align lengths for row-wise compare by index
-        min_len = min(basis.height, finacle.height)
-        basis = basis.head(min_len)
-        finacle = finacle.head(min_len)
+        # Ensure phone columns are strings and fill nulls
+        for df_name, df in {"Basis": basis, "Finacle": finacle}.items():
+            df = df.with_columns([
+                pl.col("Phone_1").fill_null("").cast(pl.Utf8),
+                pl.col("Phone_2").fill_null("").cast(pl.Utf8),
+                pl.col("Phone_3").fill_null("").cast(pl.Utf8),
+            ])
+            if df_name == "Basis":
+                basis = df
+            else:
+                finacle = df
 
-        # Compare Name, Email, Date_of_Birth
-        name_match = basis["Name"] == finacle["Name"]
-        email_match = basis["Email"] == finacle["Email"]
-        dob_match = basis["Date_of_Birth"] == finacle["Date_of_Birth"]
+        # === Match logic ===
+        # Create keys for matching
+        # We'll merge Basis and Finacle on (Name, Email, Date_of_Birth) to compare phones
 
-        # Phone match logic (any-to-any of 3 phones)
-        # For each row, check if any phone in basis matches any phone in finacle
-        phone_match = []
-        for i in range(min_len):
-            basis_phones = {basis[i, "Phone_1"], basis[i, "Phone_2"], basis[i, "Phone_3"]}
-            finacle_phones = {finacle[i, "Phone_1"], finacle[i, "Phone_2"], finacle[i, "Phone_3"]}
+        basis_key = basis.select(["Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3", "BRA_CODE", "CUS_NUM"])
+        finacle_key = finacle.select(["Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3", "ORGKEY"])
+
+        # Merge on Name, Email, Date_of_Birth (inner join)
+        merged = basis_key.join(
+            finacle_key,
+            on=["Name", "Email", "Date_of_Birth"],
+            how="outer",
+            suffix="_finacle"
+        )
+
+        # Fill nulls for phones after join
+        merged = merged.with_columns([
+            pl.col("Phone_1").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_2").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_3").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_1_finacle").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_2_finacle").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_3_finacle").fill_null("").cast(pl.Utf8),
+        ])
+
+        # Phone matching: check if any Basis phone appears in Finacle phones or vice versa
+        def phone_match(row):
+            basis_phones = {row["Phone_1"], row["Phone_2"], row["Phone_3"]}
+            finacle_phones = {row["Phone_1_finacle"], row["Phone_2_finacle"], row["Phone_3_finacle"]}
             # Remove empty strings
             basis_phones.discard("")
             finacle_phones.discard("")
-            phone_match.append(len(basis_phones.intersection(finacle_phones)) > 0)
+            # If intersection is empty, phones do not match
+            return len(basis_phones.intersection(finacle_phones)) > 0
 
-        phone_match = pl.Series("phone_match", phone_match)
+        # Convert merged to pandas for easy row-wise operation
+        merged_pd = merged.to_pandas()
+        merged_pd["Phone_Match"] = merged_pd.apply(phone_match, axis=1)
 
-        # Mismatch mask: if any field mismatches, mark True
-        mismatch_mask = ~(name_match & email_match & dob_match & phone_match)
+        # Records where any field mismatch:
+        # Conditions:
+        # - Name, Email, DOB matched in join (so present in both)
+        # - But Phone_Match is False or missing values in key columns from one side
 
-        # Collect mismatches
-        mismatches = pl.DataFrame({
-            "BRA_CODE": basis["BRA_CODE"],
-            "ACCOUNT_NUMBER": basis["CUS_NUM"],
-            "ORGKEY": finacle["ORGKEY"],
-            "Name_Basis": basis["Name"],
-            "Name_Finacle": finacle["Name"],
-            "Email_Basis": basis["Email"],
-            "Email_Finacle": finacle["Email"],
-            "DOB_Basis": basis["Date_of_Birth"],
-            "DOB_Finacle": finacle["Date_of_Birth"],
-            "Phone_Basis": basis["Phone_1"] + ", " + basis["Phone_2"] + ", " + basis["Phone_3"],
-            "Phone_Finacle": finacle["Phone_1"] + ", " + finacle["Phone_2"] + ", " + finacle["Phone_3"]
-        }).filter(mismatch_mask)
+        # We'll flag records with any mismatch:
+        # - Rows with nulls in Basis keys (BRA_CODE or CUS_NUM) => missing in Basis
+        # - Rows with nulls in Finacle key (ORGKEY) => missing in Finacle
+        # - Or Phone_Match == False
+
+        mismatch_mask = (
+            merged_pd["BRA_CODE"].isnull() | 
+            merged_pd["ORGKEY"].isnull() |
+            (merged_pd["Phone_Match"] == False)
+        )
+
+        mismatches = merged_pd[mismatch_mask]
 
         st.subheader("🔍 Mismatched Records")
 
-        if mismatches.height > 0:
-            df_out = mismatches.to_pandas()
-            st.dataframe(df_out.head(1000), use_container_width=True)  # show first 1000
+        if not mismatches.empty:
+            st.dataframe(mismatches.head(1000), use_container_width=True)
 
+            # Prepare Excel download
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df_out.to_excel(writer, index=False, sheet_name="Mismatches")
+                mismatches.to_excel(writer, index=False, sheet_name="Mismatches")
+
             st.download_button(
                 label="📥 Download Mismatches (Excel)",
                 data=output.getvalue(),
@@ -126,7 +166,7 @@ if basis_file and finacle_file:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.success("✅ All rows match on Name, Email, DOB and Phone.")
+            st.success("✅ All records match between Finacle and Basis.")
 
     except Exception as e:
         st.error(f"❌ Error processing files: {e}")
