@@ -9,48 +9,38 @@ st.title("📊 Finacle vs Basis Comparator (Large Dataset Support)")
 # === 1. Preprocessing Functions ===
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
-    # Rename relevant columns to unified names
     df = df.rename({
         "CUS_SHO_NAME": "Name",
         "EMAIL": "Email",
         "BIR_DATE": "Date_of_Birth",
         "TEL_NUM": "Phone_1",
         "TEL_NUM_2": "Phone_2",
-        "FAX_NUM": "Phone_3",
-        "CUS_NUM": "UniqueKey"  # Unique person key in BASIS
+        "FAX_NUM": "Phone_3"
     })
-    # Select needed columns and fill missing phones with empty string
-    df = df.select([
+    # Create a unique key per person (assuming CUS_NUM is unique in BASIS)
+    df = df.with_columns(pl.col("CUS_NUM").cast(pl.Utf8).alias("UniqueKey"))
+    return df.select([
         "UniqueKey", "Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"
-    ]).with_columns([
-        pl.col("Phone_1").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_2").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_3").fill_null("").cast(pl.Utf8),
     ])
-    return df
 
 def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
-    # Rename relevant columns to unified names
     df = df.rename({
         "NAME": "Name",
         "PREFERREDEMAIL": "Email",
         "CUST_DOB": "Date_of_Birth",
         "PREFERREDPHONE": "Phone_1",
-        "SMSBANKINGMOBILENUMBER": "Phone_2",
-        "ORGKEY": "UniqueKey"  # Unique person key in FINACLE
+        "SMSBANKINGMOBILENUMBER": "Phone_2"
     })
     df = df.with_columns([
-        pl.col("Phone_1").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_2").fill_null("").cast(pl.Utf8),
-        pl.lit("").alias("Phone_3")  # Add empty Phone_3 column for consistency
+        pl.lit("").alias("Phone_3"),
+        pl.col("ORGKEY").cast(pl.Utf8).alias("UniqueKey")  # unique key in FINACLE
     ])
-    df = df.select([
+    return df.select([
         "UniqueKey", "Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"
     ])
-    return df
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
-    # Lowercase, strip spaces on all string columns
+    # Lowercase and strip string columns
     for col in df.columns:
         if df[col].dtype == pl.Utf8:
             df = df.with_columns(
@@ -59,57 +49,97 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 def combine_phones(df: pl.DataFrame) -> pl.DataFrame:
-    # Combine phones into a list column
-    return df.with_columns(
+    # Fill nulls and cast phones to string
+    df = df.with_columns([
+        pl.col("Phone_1").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_2").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_3").fill_null("").cast(pl.Utf8)
+    ])
+    # Create a list column of phones
+    df = df.with_columns(
         pl.concat_list(["Phone_1", "Phone_2", "Phone_3"]).alias("Phones")
     )
+    return df
 
 def aggregate_person(df: pl.DataFrame, dataset_name: str) -> pl.DataFrame:
-    """
-    Group by Name, Email, Date_of_Birth, and aggregate phones as a list of unique phones
-    Also collect all UniqueKeys per group (to know which records belong to each person)
-    """
-    df = df.with_columns([
-        pl.col("Phones").arr.eval(pl.element().str.strip_chars()).alias("Phones"),  # strip spaces inside list elements
-    ])
+    # Explode phones into rows and normalize each phone
+    phones_exploded = (
+        df.select(["Name", "Email", "Date_of_Birth", "Phones"])
+        .explode("Phones")
+        .with_columns(
+            pl.col("Phones").str.strip_chars().str.to_lowercase().alias("Phone_Normalized")
+        )
+        .drop("Phones")
+    )
+    # Join normalized phones back to df for grouping
+    df_with_phones = df.join(phones_exploded, on=["Name", "Email", "Date_of_Birth"], how="left")
 
-    agg = df.groupby(["Name", "Email", "Date_of_Birth"]).agg([
-        pl.col("Phones").explode().unique().alias("Unique_Phones"),
+    # Aggregate unique phones, unique keys, and record counts
+    agg = df_with_phones.groupby(["Name", "Email", "Date_of_Birth"]).agg([
+        pl.col("Phone_Normalized").unique().alias("Unique_Phones"),
         pl.col("UniqueKey").unique().alias(f"{dataset_name}_UniqueKeys"),
-        pl.count().alias(f"{dataset_name}_RecordCount")
+        pl.count().alias(f"{dataset_name}_RecordCount"),
     ])
     return agg
 
-def compare_groups(basis_grp: pl.DataFrame, finacle_grp: pl.DataFrame) -> pl.DataFrame:
-    """
-    Compare the two grouped dataframes on Name, Email, Date_of_Birth:
-    - Merge on these keys with outer join to find matches and mismatches
-    - Mark mismatches where Unique_Phones or UniqueKeys differ or missing on either side
-    """
-    joined = basis_grp.join(finacle_grp, on=["Name", "Email", "Date_of_Birth"], how="outer", suffix="_finacle")
+def compare_aggregated(basis_agg: pl.DataFrame, finacle_agg: pl.DataFrame) -> pl.DataFrame:
+    # Outer join on Name, Email, Date_of_Birth
+    joined = basis_agg.join(finacle_agg, on=["Name", "Email", "Date_of_Birth"], how="outer", suffix="_finacle")
 
-    # Fill nulls to empty lists or strings so comparisons don't error
+    # Fill nulls with empty lists or empty strings
     joined = joined.with_columns([
-        pl.col("Unique_Phones").list.to_set().alias("Unique_Phones"),
-        pl.col("Unique_Phones_finacle").list.to_set().alias("Unique_Phones_finacle"),
-        pl.col("basis_UniqueKeys").list.null_to([]),
-        pl.col("finacle_UniqueKeys").list.null_to([]),
-        pl.col("basis_RecordCount").fill_null(0),
-        pl.col("finacle_RecordCount").fill_null(0),
+        pl.col("Unique_Phones").fill_null([]),
+        pl.col("Unique_Phones_finacle").fill_null([]),
+        pl.col("Basis_UniqueKeys").fill_null([]),
+        pl.col("Finacle_UniqueKeys").fill_null([]),
+        pl.col("Basis_RecordCount").fill_null(0),
+        pl.col("Finacle_RecordCount").fill_null(0),
+        pl.col("Name").fill_null(""),
+        pl.col("Email").fill_null(""),
+        pl.col("Date_of_Birth").fill_null("")
     ])
 
-    # Identify mismatches:
-    mismatch = (
-        (joined["Unique_Phones"] != joined["Unique_Phones_finacle"]) |
-        (joined["basis_UniqueKeys"].arr.lengths() != joined["finacle_UniqueKeys"].arr.lengths())
+    # Compare phones (set equality)
+    phones_match = (pl.element().arr.to_set("Unique_Phones") == pl.element().arr.to_set("Unique_Phones_finacle"))
+
+    # If phones_match not supported, fallback to python comparison below
+
+    # We can do a Python row-wise function because Polars doesn't support set equality directly
+    def phones_equal(row):
+        set_basis = set(row["Unique_Phones"]) if row["Unique_Phones"] is not None else set()
+        set_finacle = set(row["Unique_Phones_finacle"]) if row["Unique_Phones_finacle"] is not None else set()
+        return set_basis == set_finacle
+
+    # Convert to pandas for easier row-wise comparison (only for this step)
+    pdf = joined.to_pandas()
+    pdf["Phones_Match"] = pdf.apply(phones_equal, axis=1)
+
+    # Now check Name, Email, DOB exact match (lowercase & trimmed already)
+    pdf["Name_Match"] = pdf["Name"].notnull() & (pdf["Name"].duplicated(keep=False) | pdf["Name"] == pdf["Name"])
+    pdf["Email_Match"] = pdf["Email"].notnull() & (pdf["Email"].duplicated(keep=False) | pdf["Email"] == pdf["Email"])
+    pdf["DOB_Match"] = pdf["Date_of_Birth"].notnull() & (pdf["Date_of_Birth"].duplicated(keep=False) | pdf["Date_of_Birth"] == pdf["Date_of_Birth"])
+
+    # Define mismatch if any of these don't match
+    pdf["Mismatch"] = ~(
+        pdf["Phones_Match"] &
+        pdf["Name"].notnull() &
+        pdf["Email"].notnull() &
+        pdf["Date_of_Birth"].notnull()
     )
 
-    joined = joined.with_columns(
-        mismatch.alias("Mismatch")
+    # Instead of the above, let's simplify mismatch detection:
+    # Mismatch if phones differ or if the person exists only in one dataset
+
+    pdf["In_Basis"] = pdf["Basis_UniqueKeys"].apply(lambda x: len(x) > 0)
+    pdf["In_Finacle"] = pdf["Finacle_UniqueKeys"].apply(lambda x: len(x) > 0)
+
+    pdf["Mismatch"] = (
+        (pdf["In_Basis"] != pdf["In_Finacle"]) |  # person missing in one dataset
+        (~pdf["Phones_Match"])                    # or phones differ
     )
 
     # Filter mismatches only
-    mismatches = joined.filter(pl.col("Mismatch") == True)
+    mismatches = pdf[pdf["Mismatch"]]
 
     return mismatches
 
@@ -125,7 +155,7 @@ with col2:
 
 if basis_file and finacle_file:
     try:
-        # Read files with Polars
+        # Read files using Polars
         basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
         finacle_df = pl.read_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.read_csv(finacle_file)
 
@@ -141,44 +171,22 @@ if basis_file and finacle_file:
         basis = combine_phones(basis)
         finacle = combine_phones(finacle)
 
-        # Aggregate by person group
-        basis_grouped = aggregate_person(basis, "basis")
-        finacle_grouped = aggregate_person(finacle, "finacle")
+        # Aggregate per person (Name, Email, DOB) with phones & keys
+        basis_agg = aggregate_person(basis, "Basis")
+        finacle_agg = aggregate_person(finacle, "Finacle")
 
-        # Compare groups and get mismatches
-        mismatches = compare_groups(basis_grouped, finacle_grouped)
+        # Compare aggregated data for mismatches
+        mismatches = compare_aggregated(basis_agg, finacle_agg)
 
-        st.subheader("🔍 Mismatched Person Groups")
+        st.subheader("🔍 Mismatched Records")
 
-        if mismatches.height == 0:
-            st.success("✅ All person groups match between Finacle and Basis.")
-        else:
-            # Show in two columns
-            colA, colB = st.columns(2)
+        if len(mismatches) > 0:
+            st.dataframe(mismatches, use_container_width=True)
 
-            with colA:
-                st.markdown("### BASIS Data")
-                df_basis_show = mismatches.select([
-                    "Name", "Email", "Date_of_Birth", "basis_UniqueKeys", "Unique_Phones", "basis_RecordCount"
-                ]).to_pandas()
-                df_basis_show["Unique_Phones"] = df_basis_show["Unique_Phones"].apply(lambda x: ", ".join(x))
-                df_basis_show["basis_UniqueKeys"] = df_basis_show["basis_UniqueKeys"].apply(lambda x: ", ".join(map(str, x)))
-                st.dataframe(df_basis_show)
-
-            with colB:
-                st.markdown("### FINACLE Data")
-                df_finacle_show = mismatches.select([
-                    "Name", "Email", "Date_of_Birth", "finacle_UniqueKeys", "Unique_Phones_finacle", "finacle_RecordCount"
-                ]).to_pandas()
-                df_finacle_show["Unique_Phones_finacle"] = df_finacle_show["Unique_Phones_finacle"].apply(lambda x: ", ".join(x))
-                df_finacle_show["finacle_UniqueKeys"] = df_finacle_show["finacle_UniqueKeys"].apply(lambda x: ", ".join(map(str, x)))
-                st.dataframe(df_finacle_show)
-
-            # Prepare downloadable Excel of mismatches
+            # Export to Excel for download
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df_basis_show.to_excel(writer, index=False, sheet_name="Basis_Mismatches")
-                df_finacle_show.to_excel(writer, index=False, sheet_name="Finacle_Mismatches")
+                mismatches.to_excel(writer, index=False, sheet_name="Mismatches")
 
             st.download_button(
                 label="📥 Download Mismatches (Excel)",
@@ -186,6 +194,8 @@ if basis_file and finacle_file:
                 file_name="finacle_basis_mismatches.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+        else:
+            st.success("✅ All records match between Finacle and Basis.")
 
     except Exception as e:
         st.error(f"❌ Error processing files: {e}")
