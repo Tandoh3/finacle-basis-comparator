@@ -35,9 +35,13 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
     ])
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
-    return df.with_columns([
-        pl.col(col).cast(pl.Utf8).str.strip_chars().str.to_lowercase() for col in df.columns if df[col].dtype == pl.Utf8
-    ])
+    # Lowercase and strip string columns
+    for col in df.columns:
+        if df[col].dtype == pl.Utf8:
+            df = df.with_columns(
+                pl.col(col).str.strip_chars().str.to_lowercase().alias(col)
+            )
+    return df
 
 # === 2. Upload Section ===
 
@@ -63,7 +67,28 @@ if basis_file and finacle_file:
         basis = normalize(preprocess_basis(basis_df))
         finacle = normalize(preprocess_finacle(finacle_df))
 
-        # Align by index
+        # Ensure phone columns are strings and fill nulls
+        for df in [basis, finacle]:
+            df = df.with_columns([
+                pl.col("Phone_1").fill_null("").cast(pl.Utf8),
+                pl.col("Phone_2").fill_null("").cast(pl.Utf8),
+                pl.col("Phone_3").fill_null("").cast(pl.Utf8),
+            ])
+
+        # Use with_columns above returns new df, so reassign:
+        basis = basis.with_columns([
+            pl.col("Phone_1").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_2").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_3").fill_null("").cast(pl.Utf8),
+        ])
+
+        finacle = finacle.with_columns([
+            pl.col("Phone_1").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_2").fill_null("").cast(pl.Utf8),
+            pl.col("Phone_3").fill_null("").cast(pl.Utf8),
+        ])
+
+        # Align by index (truncate to shortest)
         min_len = min(basis.height, finacle.height)
         basis = basis.head(min_len)
         finacle = finacle.head(min_len)
@@ -73,20 +98,20 @@ if basis_file and finacle_file:
         email_match = basis["Email"] == finacle["Email"]
         dob_match = basis["Date of Birth"] == finacle["Date of Birth"]
 
-        # Phone match logic (any-to-any)
+        # Phone match logic (any-to-any) with to_list() on Finacle phone columns
         phone_match = (
-            basis["Phone_1"].isin(finacle["Phone_1"]) |
-            basis["Phone_1"].isin(finacle["Phone_2"]) |
-            basis["Phone_1"].isin(finacle["Phone_3"]) |
-            basis["Phone_2"].isin(finacle["Phone_1"]) |
-            basis["Phone_2"].isin(finacle["Phone_2"]) |
-            basis["Phone_2"].isin(finacle["Phone_3"]) |
-            basis["Phone_3"].isin(finacle["Phone_1"]) |
-            basis["Phone_3"].isin(finacle["Phone_2"]) |
-            basis["Phone_3"].isin(finacle["Phone_3"])
+            basis["Phone_1"].is_in(finacle["Phone_1"].to_list()) |
+            basis["Phone_1"].is_in(finacle["Phone_2"].to_list()) |
+            basis["Phone_1"].is_in(finacle["Phone_3"].to_list()) |
+            basis["Phone_2"].is_in(finacle["Phone_1"].to_list()) |
+            basis["Phone_2"].is_in(finacle["Phone_2"].to_list()) |
+            basis["Phone_2"].is_in(finacle["Phone_3"].to_list()) |
+            basis["Phone_3"].is_in(finacle["Phone_1"].to_list()) |
+            basis["Phone_3"].is_in(finacle["Phone_2"].to_list()) |
+            basis["Phone_3"].is_in(finacle["Phone_3"].to_list())
         )
 
-        # Mismatch condition
+        # Mismatch mask: any field not matching means mismatch
         mismatch_mask = ~(name_match & email_match & dob_match & phone_match)
 
         # Output mismatches
@@ -108,7 +133,7 @@ if basis_file and finacle_file:
 
         if mismatches.height > 0:
             df_out = mismatches.to_pandas()
-            st.dataframe(df_out.head(1000), use_container_width=True)  # Only show first 1000 for performance
+            st.dataframe(df_out.head(1000), use_container_width=True)  # Show first 1000
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
