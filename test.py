@@ -32,12 +32,6 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
     })
     df = df.with_columns(pl.lit("").alias("Phone_3_Finacle"))
-    # Explicitly cast phone columns to Utf8 (string)
-    df = df.with_columns([
-        pl.col("Phone_1_Finacle").cast(pl.Utf8),
-        pl.col("Phone_2_Finacle").cast(pl.Utf8),
-        pl.col("Phone_3_Finacle").cast(pl.Utf8)
-    ])
     return df.select([
         "Name", "Email_Finacle", "Date_of_Birth_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"
     ])
@@ -52,7 +46,7 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 def combine_phones(df: pl.DataFrame, prefix: str) -> pl.DataFrame:
-    # Fill nulls and cast phones to string (redundant after preprocess, but safe)
+    # Fill nulls and cast phones to string
     df = df.with_columns([
         pl.col(f"Phone_1_{prefix}").fill_null("").cast(pl.Utf8),
         pl.col(f"Phone_2_{prefix}").fill_null("").cast(pl.Utf8),
@@ -173,9 +167,21 @@ with col2:
 
 if basis_file and finacle_file:
     try:
-        # Read files using Polars
+        # Read files using Polars, explicitly setting schema_overrides for 'PREFERREDPHONE' as Utf8
+        finacle_df = None
+        if finacle_file.name.endswith("xlsx"):
+            finacle_df = pl.read_excel(finacle_file)
+        else:
+            try:
+                finacle_df = pl.read_csv(
+                    finacle_file,
+                    schema_overrides={"PREFERREDPHONE": pl.Utf8}
+                )
+            except Exception as e:
+                st.error(f"Error reading CSV with schema override: {e}")
+                return
+
         basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
-        finacle_df = pl.read_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.read_csv(finacle_file)
 
         st.subheader("📄 Uploaded Summary")
         st.write(f"🔹 BASIS Rows: {basis_df.height}")
