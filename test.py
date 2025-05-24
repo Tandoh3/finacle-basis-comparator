@@ -1,87 +1,118 @@
 import streamlit as st
-import duckdb
+import dask.dataframe as dd
 import pandas as pd
-from thefuzz import fuzz
 import io
 
-st.set_page_config(page_title="DuckDB Fuzzy Matcher", layout="wide")
-st.title("🔍 Fuzzy Match Finacle vs Basis Using DuckDB")
+st.set_page_config(page_title="Finacle vs Basis Comparison Tool", layout="wide")
+st.title("📊 Finacle vs Basis Record Comparator")
 
-# Upload CSVs
+# Helper functions
+def preprocess_basis(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.rename(columns={
+        "BRA_CODE": "BRA_CODE",
+        "CUS_NUM": "ACCOUNT_NUMBER",
+        "CUS_SHO_NAME": "Name",
+        "EMAIL": "Email",
+        "BIR_DATE": "Date of Birth",
+        "TEL_NUM": "Phone_1",
+        "TEL_NUM_2": "Phone_2",
+        "FAX_NUM": "Phone_3"
+    })
+    return df[["BRA_CODE", "ACCOUNT_NUMBER", "Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"]]
+
+def preprocess_finacle(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.rename(columns={
+        "ORGKEY": "ORGKEY",
+        "NAME": "Name",
+        "PREFERREDEMAIL": "Email",
+        "CUST_DOB": "Date of Birth",
+        "PREFERREDPHONE": "Phone_1",
+        "SMSBANKINGMOBILENUMBER": "Phone_2"
+    })
+    df["Phone_3"] = ""
+    return df[["ORGKEY", "Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"]]
+
+def normalize(df: pd.DataFrame) -> pd.DataFrame:
+    return df.apply(lambda col: col.astype(str).str.strip().str.lower() if col.dtype == object else col)
+
+def dask_read(file):
+    if file.name.endswith("csv"):
+        return dd.read_csv(file)
+    else:
+        raise ValueError("Dask currently doesn't support XLSX in-memory reading reliably. Convert to CSV.")
+
+# Upload section
 col1, col2 = st.columns(2)
 with col1:
-    basis_file = st.file_uploader("📥 Upload BASIS CSV", type="csv", key="basis")
+    basis_file = st.file_uploader("📥 Upload BASIS File (CSV)", type=["csv"], key="basis")
 with col2:
-    finacle_file = st.file_uploader("📥 Upload FINACLE CSV", type="csv", key="finacle")
+    finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV)", type=["csv"], key="finacle")
 
 if basis_file and finacle_file:
-    with st.spinner("⏳ Loading files into DuckDB..."):
+    try:
+        with st.spinner("🔄 Processing large files... please wait..."):
+            basis_ddf = dask_read(basis_file)
+            finacle_ddf = dask_read(finacle_file)
 
-        # Load data into DuckDB from CSVs
-        con = duckdb.connect()
-        con.execute("INSTALL sqlite_scanner; LOAD sqlite_scanner;")
-        con.sql("CREATE TABLE basis AS SELECT * FROM read_csv_auto($1)", [basis_file])
-        con.sql("CREATE TABLE finacle AS SELECT * FROM read_csv_auto($1)", [finacle_file])
+            basis_df = basis_ddf.compute()
+            finacle_df = finacle_ddf.compute()
 
-        # Clean column names (use standard ones)
-        basis = con.execute("SELECT BRA_CODE, CUS_NUM AS ACCOUNT_NUMBER, CUS_SHO_NAME AS Name, EMAIL AS Email, BIR_DATE AS DOB FROM basis").df()
-        finacle = con.execute("SELECT ORGKEY, NAME AS Name, PREFERREDEMAIL AS Email, CUST_DOB AS DOB FROM finacle").df()
+            st.subheader("📄 Uploaded File Summary")
+            st.write(f"🔹 BASIS Rows: {len(basis_df)}")
+            st.write(f"🔹 FINACLE Rows: {len(finacle_df)}")
 
-    # Normalize
-    def normalize(col):
-        return col.astype(str).str.strip().str.lower()
+            # Preprocess
+            basis = normalize(preprocess_basis(basis_df))
+            finacle = normalize(preprocess_finacle(finacle_df))
 
-    basis["Name_norm"] = normalize(basis["Name"])
-    finacle["Name_norm"] = normalize(finacle["Name"])
-    basis["DOB_norm"] = pd.to_datetime(basis["DOB"], errors='coerce').dt.date
-    finacle["DOB_norm"] = pd.to_datetime(finacle["DOB"], errors='coerce').dt.date
+            # For demo purposes, match by row index
+            min_len = min(len(basis), len(finacle))
+            basis = basis.iloc[:min_len]
+            finacle = finacle.iloc[:min_len]
 
-    # Limit matches for performance during testing (remove in production)
-    basis = basis.dropna(subset=["Name_norm", "DOB_norm"]).head(5000)
-    finacle = finacle.dropna(subset=["Name_norm", "DOB_norm"]).head(5000)
+            # Compare fields
+            result = pd.DataFrame({
+                "BRA_CODE": basis["BRA_CODE"],
+                "ACCOUNT_NUMBER": basis["ACCOUNT_NUMBER"],
+                "ORGKEY": finacle["ORGKEY"],
+                "Name_Basis": basis["Name"],
+                "Name_Finacle": finacle["Name"],
+                "Email_Basis": basis["Email"],
+                "Email_Finacle": finacle["Email"],
+                "DOB_Basis": basis["Date of Birth"],
+                "DOB_Finacle": finacle["Date of Birth"],
+                "Phone_Basis": basis["Phone_1"] + ", " + basis["Phone_2"] + ", " + basis["Phone_3"],
+                "Phone_Finacle": finacle["Phone_1"] + ", " + finacle["Phone_2"] + ", " + finacle["Phone_3"]
+            })
 
-    st.success(f"✅ Loaded {len(basis)} BASIS records and {len(finacle)} FINACLE records")
+            # Flag mismatches
+            result["Name_Match"] = result["Name_Basis"] == result["Name_Finacle"]
+            result["Email_Match"] = result["Email_Basis"] == result["Email_Finacle"]
+            result["DOB_Match"] = result["DOB_Basis"] == result["DOB_Finacle"]
+            result["Phone_Match"] = result.apply(
+                lambda row: any(p in row["Phone_Finacle"] for p in row["Phone_Basis"].split(", ")), axis=1
+            )
 
-    # Match using Fuzzy + DOB
-    st.info("🔍 Matching records using fuzzy name match and DOB...")
+            mismatches = result[
+                ~(result["Name_Match"] & result["Email_Match"] & result["DOB_Match"] & result["Phone_Match"])
+            ]
 
-    matches = []
-    for i, b_row in basis.iterrows():
-        for j, f_row in finacle.iterrows():
-            dob_match = b_row["DOB_norm"] == f_row["DOB_norm"]
-            name_score = fuzz.token_sort_ratio(b_row["Name_norm"], f_row["Name_norm"])
+        st.subheader("🔍 Mismatched Records")
+        if not mismatches.empty:
+            st.dataframe(mismatches.drop(columns=["Name_Match", "Email_Match", "DOB_Match", "Phone_Match"]), use_container_width=True)
 
-            if dob_match and name_score > 85:
-                matches.append({
-                    "BRA_CODE": b_row["BRA_CODE"],
-                    "ACCOUNT_NUMBER": b_row["ACCOUNT_NUMBER"],
-                    "ORGKEY": f_row["ORGKEY"],
-                    "Name_Basis": b_row["Name"],
-                    "Name_Finacle": f_row["Name"],
-                    "DOB_Basis": b_row["DOB"],
-                    "DOB_Finacle": f_row["DOB"],
-                    "Email_Basis": b_row["Email"],
-                    "Email_Finacle": f_row["Email"],
-                    "Match_Score": name_score
-                })
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                mismatches.to_excel(writer, index=False, sheet_name="Mismatches")
 
-    matched_df = pd.DataFrame(matches)
+            st.download_button(
+                label="📥 Download Mismatches as Excel",
+                data=output.getvalue(),
+                file_name="finacle_basis_mismatches.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.success("✅ No mismatches found!")
 
-    if not matched_df.empty:
-        st.subheader("✅ Matched Records")
-        st.dataframe(matched_df, use_container_width=True)
-
-        # Download
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            matched_df.to_excel(writer, index=False, sheet_name="Matches")
-
-        st.download_button(
-            label="📥 Download Matched Results",
-            data=output.getvalue(),
-            file_name="fuzzy_matches.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.warning("⚠️ No matches found based on DOB and fuzzy name similarity.")
-
+    except Exception as e:
+        st.error(f"❌ Error processing files: {e}")
