@@ -32,6 +32,12 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
     })
     df = df.with_columns(pl.lit("").alias("Phone_3_Finacle"))
+    # Explicitly cast phone columns to Utf8 (string)
+    df = df.with_columns([
+        pl.col("Phone_1_Finacle").cast(pl.Utf8),
+        pl.col("Phone_2_Finacle").cast(pl.Utf8),
+        pl.col("Phone_3_Finacle").cast(pl.Utf8)
+    ])
     return df.select([
         "Name", "Email_Finacle", "Date_of_Birth_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"
     ])
@@ -46,7 +52,7 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 def combine_phones(df: pl.DataFrame, prefix: str) -> pl.DataFrame:
-    # Fill nulls and cast phones to string
+    # Fill nulls and cast phones to string (redundant after preprocess, but safe)
     df = df.with_columns([
         pl.col(f"Phone_1_{prefix}").fill_null("").cast(pl.Utf8),
         pl.col(f"Phone_2_{prefix}").fill_null("").cast(pl.Utf8),
@@ -91,48 +97,36 @@ def fuzzy_match_dates(d1, d2, threshold_days=30):
 
 def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_threshold=85, email_threshold=90, phone_threshold=85, dob_threshold_days=30):
     # Normalize both dataframes
-    basis_normalized = normalize(basis_df)
-    finacle_normalized = normalize(finacle_df)
+    basis_normalized = normalize(basis_df).to_pandas()
+    finacle_normalized = normalize(finacle_df).to_pandas()
 
-    basis_with_phones = combine_phones(basis_normalized, "Basis")
-    finacle_with_phones = combine_phones(finacle_normalized, "Finacle")
-
-    # Convert phone lists to have string elements explicitly
-    basis_with_phones = basis_with_phones.with_columns(
-        pl.col("Phones_Basis").list.eval(pl.element().cast(pl.Utf8)).alias("Phones_Basis")
-    )
-    finacle_with_phones = finacle_with_phones.with_columns(
-        pl.col("Phones_Finacle").list.eval(pl.element().cast(pl.Utf8)).alias("Phones_Finacle")
-    )
-
-    # Convert to Pandas DataFrames
-    basis_pdf = basis_with_phones.to_pandas()
-    finacle_pdf = finacle_with_phones.to_pandas()
+    basis_with_phones = basis_normalized.apply(lambda row: {'Name': row['Name'], 'Email_Basis': row['Email_Basis'], 'Date_of_Birth_Basis': row['Date_of_Birth_Basis'], 'Phones_Basis': [p for p in [row['Phone_1_Basis'], row['Phone_2_Basis'], row['Phone_3_Basis']] if p]}, axis=1).tolist()
+    finacle_with_phones = finacle_normalized.apply(lambda row: {'Name': row['Name'], 'Email_Finacle': row['Email_Finacle'], 'Date_of_Birth_Finacle': row['Date_of_Birth_Finacle'], 'Phones_Finacle': [p for p in [row['Phone_1_Finacle'], row['Phone_2_Finacle'], row['Phone_3_Finacle']] if p]}, axis=1).tolist()
 
     matches = []
     mismatches = []
     matched_indices_finacle = set()
 
-    for index_basis, basis_record in basis_pdf.iterrows():
+    for basis_record in basis_with_phones:
         best_match = None
         best_score = 0
         best_index_finacle = -1
 
-        for index_finacle, finacle_record in finacle_pdf.iterrows():
-            if index_finacle in matched_indices_finacle:
+        for i, finacle_record in enumerate(finacle_with_phones):
+            if i in matched_indices_finacle:
                 continue
 
             name_match, name_score = fuzzy_match_string(basis_record['Name'], finacle_record['Name'], name_threshold)
-            email_match, email_score = fuzzy_match_string(str(basis_record.get('Email_Basis', '')), str(finacle_record.get('Email_Finacle', '')), email_threshold)
+            email_match, email_score = fuzzy_match_string(basis_record.get('Email_Basis'), finacle_record.get('Email_Finacle'), email_threshold)
             dob_match, dob_score = fuzzy_match_dates(basis_record.get('Date_of_Birth_Basis'), finacle_record.get('Date_of_Birth_Finacle'), dob_threshold_days)
-            phone_match, phone_score = fuzzy_match_phones(basis_record.get('Phones_Basis', []), finacle_record.get('Phones_Finacle', []), phone_threshold)
+            phone_match, phone_score = fuzzy_match_phones(basis_record.get('Phones_Basis'), finacle_record.get('Phones_Finacle'), phone_threshold)
 
             combined_score = (name_score * 0.4) + (email_score * 0.3) + (dob_score * 0.2) + (phone_score * 0.1) if name_match else 0
 
             if combined_score > best_score and name_match:
                 best_score = combined_score
                 best_match = finacle_record
-                best_index_finacle = index_finacle
+                best_index_finacle = i
 
         if best_match:
             matches.append({
@@ -156,8 +150,8 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_th
             })
 
     # Add unmatched Finacle records to mismatches
-    for index_finacle, finacle_record in finacle_pdf.iterrows():
-        if index_finacle not in matched_indices_finacle:
+    for i, finacle_record in enumerate(finacle_with_phones):
+        if i not in matched_indices_finacle:
             mismatches.append({
                 "Finacle_Name": finacle_record['Name'],
                 "Email_Finacle": finacle_record.get('Email_Finacle'),
@@ -176,69 +170,53 @@ with col2:
     finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV/XLSX)", type=["csv", "xlsx"], key="finacle")
 
 # === 3. Processing Logic ===
-def process_uploaded_files(basis_file, finacle_file):
-    if basis_file and finacle_file:
-        try:
-            # Read files using Polars, explicitly setting dtype for 'PREFERREDPHONE' as Utf8
-            finacle_df = None
-            if finacle_file.name.endswith("xlsx"):
-                finacle_df = pl.read_excel(finacle_file)
-            else:
-                try:
-                    finacle_df = pl.read_csv(finacle_file, dtypes={"PREFERREDPHONE": pl.Utf8})
-                except Exception as e:
-                    st.error(f"Error reading CSV with explicit dtype: {e}")
-                    return
 
-            basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
-
-            if basis_df is None or finacle_df is None:
-                return
-
-            st.subheader("📄 Uploaded Summary")
-            st.write(f"🔹 BASIS Rows: {basis_df.height}")
-            st.write(f"🔹 FINACLE Rows: {finacle_df.height}")
-
-            # Preprocess the data
-            basis_processed = preprocess_basis(basis_df)
-            finacle_processed = preprocess_finacle(finacle_df)
-
-            # Find fuzzy matches
-            matches_df, mismatches_df = find_fuzzy_matches(basis_processed, finacle_processed)
-
-            st.subheader("✅ Fuzzy Matches (Potential Same Person)")
-            if not matches_df.empty:
-                st.dataframe(matches_df, use_container_width=True)
-                output_matches = io.BytesIO()
-                with pd.ExcelWriter(output_matches, engine="openpyxl") as writer:
-                    matches_df.to_excel(writer, index=False, sheet_name="Fuzzy_Matches")
-                st.download_button(
-                    label="📥 Download Fuzzy Matches (Excel)",
-                    data=output_matches.getvalue(),
-                    file_name="fuzzy_matches.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.info("No fuzzy matches found based on the defined thresholds.")
-
-            st.subheader("💔 Mismatches (No Significant Fuzzy Match)")
-            if not mismatches_df.empty:
-                st.dataframe(mismatches_df, use_container_width=True)
-                output_mismatches = io.BytesIO()
-                with pd.ExcelWriter(output_mismatches, engine="openpyxl") as writer:
-                    mismatches_df.to_excel(writer, index=False, sheet_name="Mismatches")
-                st.download_button(
-                    label="📥 Download Mismatches (Excel)",
-                    data=output_mismatches.getvalue(),
-                    file_name="fuzzy_mismatches.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.info("No significant mismatches found.")
-
-        except Exception as e:
-            st.error(f"❌ Error processing files: {e}")
-
-# Call the processing function
 if basis_file and finacle_file:
-    process_uploaded_files(basis_file, finacle_file)
+    try:
+        # Read files using Polars
+        basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
+        finacle_df = pl.read_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.read_csv(finacle_file)
+
+        st.subheader("📄 Uploaded Summary")
+        st.write(f"🔹 BASIS Rows: {basis_df.height}")
+        st.write(f"🔹 FINACLE Rows: {finacle_df.height}")
+
+        # Preprocess the data
+        basis_processed = preprocess_basis(basis_df)
+        finacle_processed = preprocess_finacle(finacle_df)
+
+        # Find fuzzy matches
+        matches_df, mismatches_df = find_fuzzy_matches(basis_processed, finacle_processed)
+
+        st.subheader("✅ Fuzzy Matches (Potential Same Person)")
+        if not matches_df.empty:
+            st.dataframe(matches_df, use_container_width=True)
+            output_matches = io.BytesIO()
+            with pd.ExcelWriter(output_matches, engine="openpyxl") as writer:
+                matches_df.to_excel(writer, index=False, sheet_name="Fuzzy_Matches")
+            st.download_button(
+                label="📥 Download Fuzzy Matches (Excel)",
+                data=output_matches.getvalue(),
+                file_name="fuzzy_matches.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No fuzzy matches found based on the defined thresholds.")
+
+        st.subheader("💔 Mismatches (No Significant Fuzzy Match)")
+        if not mismatches_df.empty:
+            st.dataframe(mismatches_df, use_container_width=True)
+            output_mismatches = io.BytesIO()
+            with pd.ExcelWriter(output_mismatches, engine="openpyxl") as writer:
+                mismatches_df.to_excel(writer, index=False, sheet_name="Mismatches")
+            st.download_button(
+                label="📥 Download Mismatches (Excel)",
+                data=output_mismatches.getvalue(),
+                file_name="fuzzy_mismatches.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No significant mismatches found.")
+
+    except Exception as e:
+        st.error(f"❌ Error processing files: {e}")
