@@ -2,4 +2,3 @@ streamlit
 polars
 pandas
 openpyxl
-io
