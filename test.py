@@ -32,6 +32,12 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
     })
     df = df.with_columns(pl.lit("").alias("Phone_3_Finacle"))
+    # Explicitly cast phone columns to Utf8 (string)
+    df = df.with_columns([
+        pl.col("Phone_1_Finacle").cast(pl.Utf8),
+        pl.col("Phone_2_Finacle").cast(pl.Utf8),
+        pl.col("Phone_3_Finacle").cast(pl.Utf8)
+    ])
     return df.select([
         "Name", "Email_Finacle", "Date_of_Birth_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"
     ])
@@ -46,7 +52,7 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 def combine_phones(df: pl.DataFrame, prefix: str) -> pl.DataFrame:
-    # Fill nulls and cast phones to string
+    # Fill nulls and cast phones to string (redundant after preprocess, but safe)
     df = df.with_columns([
         pl.col(f"Phone_1_{prefix}").fill_null("").cast(pl.Utf8),
         pl.col(f"Phone_2_{prefix}").fill_null("").cast(pl.Utf8),
