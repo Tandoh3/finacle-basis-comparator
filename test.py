@@ -91,36 +91,48 @@ def fuzzy_match_dates(d1, d2, threshold_days=30):
 
 def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_threshold=85, email_threshold=90, phone_threshold=85, dob_threshold_days=30):
     # Normalize both dataframes
-    basis_normalized = normalize(basis_df).to_pandas()
-    finacle_normalized = normalize(finacle_df).to_pandas()
+    basis_normalized = normalize(basis_df)
+    finacle_normalized = normalize(finacle_df)
 
-    basis_with_phones = basis_normalized.apply(lambda row: {'Name': row['Name'], 'Email_Basis': row['Email_Basis'], 'Date_of_Birth_Basis': row['Date_of_Birth_Basis'], 'Phones_Basis': [p for p in [row['Phone_1_Basis'], row['Phone_2_Basis'], row['Phone_3_Basis']] if p]}, axis=1).tolist()
-    finacle_with_phones = finacle_normalized.apply(lambda row: {'Name': row['Name'], 'Email_Finacle': row['Email_Finacle'], 'Date_of_Birth_Finacle': row['Date_of_Birth_Finacle'], 'Phones_Finacle': [p for p in [row['Phone_1_Finacle'], row['Phone_2_Finacle'], row['Phone_3_Finacle']] if p]}, axis=1).tolist()
+    basis_with_phones = combine_phones(basis_normalized, "Basis")
+    finacle_with_phones = combine_phones(finacle_normalized, "Finacle")
+
+    # Convert phone lists to have string elements explicitly
+    basis_with_phones = basis_with_phones.with_columns(
+        pl.col("Phones_Basis").list.eval(pl.element().cast(pl.Utf8)).alias("Phones_Basis")
+    )
+    finacle_with_phones = finacle_with_phones.with_columns(
+        pl.col("Phones_Finacle").list.eval(pl.element().cast(pl.Utf8)).alias("Phones_Finacle")
+    )
+
+    # Convert to Pandas DataFrames
+    basis_pdf = basis_with_phones.to_pandas()
+    finacle_pdf = finacle_with_phones.to_pandas()
 
     matches = []
     mismatches = []
     matched_indices_finacle = set()
 
-    for basis_record in basis_with_phones:
+    for index_basis, basis_record in basis_pdf.iterrows():
         best_match = None
         best_score = 0
         best_index_finacle = -1
 
-        for i, finacle_record in enumerate(finacle_with_phones):
-            if i in matched_indices_finacle:
+        for index_finacle, finacle_record in finacle_pdf.iterrows():
+            if index_finacle in matched_indices_finacle:
                 continue
 
             name_match, name_score = fuzzy_match_string(basis_record['Name'], finacle_record['Name'], name_threshold)
-            email_match, email_score = fuzzy_match_string(basis_record.get('Email_Basis'), finacle_record.get('Email_Finacle'), email_threshold)
+            email_match, email_score = fuzzy_match_string(str(basis_record.get('Email_Basis', '')), str(finacle_record.get('Email_Finacle', '')), email_threshold)
             dob_match, dob_score = fuzzy_match_dates(basis_record.get('Date_of_Birth_Basis'), finacle_record.get('Date_of_Birth_Finacle'), dob_threshold_days)
-            phone_match, phone_score = fuzzy_match_phones(basis_record.get('Phones_Basis'), finacle_record.get('Phones_Finacle'), phone_threshold)
+            phone_match, phone_score = fuzzy_match_phones(basis_record.get('Phones_Basis', []), finacle_record.get('Phones_Finacle', []), phone_threshold)
 
             combined_score = (name_score * 0.4) + (email_score * 0.3) + (dob_score * 0.2) + (phone_score * 0.1) if name_match else 0
 
             if combined_score > best_score and name_match:
                 best_score = combined_score
                 best_match = finacle_record
-                best_index_finacle = i
+                best_index_finacle = index_finacle
 
         if best_match:
             matches.append({
@@ -144,8 +156,8 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_th
             })
 
     # Add unmatched Finacle records to mismatches
-    for i, finacle_record in enumerate(finacle_with_phones):
-        if i not in matched_indices_finacle:
+    for index_finacle, finacle_record in finacle_pdf.iterrows():
+        if index_finacle not in matched_indices_finacle:
             mismatches.append({
                 "Finacle_Name": finacle_record['Name'],
                 "Email_Finacle": finacle_record.get('Email_Finacle'),
