@@ -154,76 +154,7 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_th
 
     return pd.DataFrame(matches), pd.DataFrame(mismatches)
 
-# === 3. Upload Section ===
-
-col1, col2 = st.columns(2)
-with col1:
-    basis_file = st.file_uploader("📥 Upload BASIS File (CSV/XLSX)", type=["csv", "xlsx"], key="basis")
-with col2:
-    finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV/XLSX)", type=["csv", "xlsx"], key="finacle")
-
-# === 4. Processing Logic ===
-
-if basis_file and finacle_file:
-    try:
-        # Read files using Polars
-        basis_df_lazy = pl.scan_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.scan_csv(basis_file)
-        finacle_df_lazy = pl.scan_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.scan_csv(
-            finacle_file,
-            schema_overrides={"PREFERREDPHONE": pl.Utf8}
-        )
-
-        st.subheader("⏳ Processing Data (Lazy Loading)")
-        st.info("Data is being processed using lazy loading. This might take some time for large datasets.")
-
-        basis_processed_lazy = preprocess_basis_lazy(basis_df_lazy)
-        finacle_processed_lazy = preprocess_finacle_lazy(finacle_df_lazy)
-        basis_normalized_lazy = normalize_lazy(basis_processed_lazy)
-        finacle_normalized_lazy = normalize_lazy(finacle_processed_lazy)
-        basis_with_phones_lazy = combine_phones_lazy(basis_normalized_lazy, "Basis")
-        finacle_with_phones_lazy = combine_phones_lazy(finacle_normalized_lazy, "Finacle")
-
-        st.subheader("⬇️ Collecting Data for Matching")
-        basis_df = basis_with_phones_lazy.collect()
-        finacle_df = finacle_with_phones_lazy.collect()
-
-        st.subheader("✅ Performing Fuzzy Matching")
-        matches_df, mismatches_df = find_fuzzy_matches(basis_df, finacle_df)
-
-        st.subheader("✅ Fuzzy Matches (Potential Same Person)")
-        if not matches_df.empty:
-            st.dataframe(matches_df.head(100), use_container_width=True)
-            output_matches = io.BytesIO()
-            with pd.ExcelWriter(output_matches, engine="openpyxl") as writer:
-                matches_df.to_excel(writer, index=False, sheet_name="Fuzzy_Matches")
-            st.download_button(
-                label="📥 Download Fuzzy Matches (Excel)",
-                data=output_matches.getvalue(),
-                file_name="fuzzy_matches.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("No fuzzy matches found based on the defined thresholds.")
-
-        st.subheader("💔 Mismatches (No Significant Fuzzy Match)")
-        if not mismatches_df.empty:
-            st.dataframe(mismatches_df.head(100), use_container_width=True)
-            output_mismatches = io.BytesIO()
-            with pd.ExcelWriter(output_mismatches, engine="openpyxl") as writer:
-                mismatches_df.to_excel(writer, index=False, sheet_name="Mismatches")
-            st.download_button(
-                label="📥 Download Mismatches (Excel)",
-                data=output_mismatches.getvalue(),
-                file_name="fuzzy_mismatches.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("No significant mismatches found.")
-
-    except Exception as e:
-        st.error(f"❌ Error processing files: {e}")
-
-# Lazy preprocessing functions (for potentially large datasets)
+# === 3. Lazy Preprocessing Functions ===
 def preprocess_basis_lazy(ldf: pl.LazyFrame) -> pl.LazyFrame:
     return ldf.rename({
         "CUS_SHO_NAME": "Name",
@@ -269,3 +200,72 @@ def combine_phones_lazy(ldf: pl.LazyFrame, prefix: str) -> pl.LazyFrame:
         pl.concat_list([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"]).alias(f"Phones_{prefix}")
     ).drop([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"])
     return ldf
+
+# === 4. Upload Section ===
+
+col1, col2 = st.columns(2)
+with col1:
+    basis_file = st.file_uploader("📥 Upload BASIS File (CSV/XLSX)", type=["csv", "xlsx"], key="basis")
+with col2:
+    finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV/XLSX)", type=["csv", "xlsx"], key="finacle")
+
+# === 5. Processing Logic ===
+
+if basis_file and finacle_file:
+    try:
+        # Read files using Polars LazyFrames
+        basis_ldf = pl.scan_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.scan_csv(basis_file)
+        finacle_ldf = pl.scan_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.scan_csv(
+            finacle_file,
+            schema_overrides={"PREFERREDPHONE": pl.Utf8}
+        )
+
+        st.subheader("⏳ Processing Data (Lazy Loading)")
+        st.info("Data is being processed using lazy loading. This might take some time for large datasets.")
+
+        basis_processed_lazy = preprocess_basis_lazy(basis_ldf)
+        finacle_processed_lazy = preprocess_finacle_lazy(finacle_ldf)
+        basis_normalized_lazy = normalize_lazy(basis_processed_lazy)
+        finacle_normalized_lazy = normalize_lazy(finacle_processed_lazy)
+        basis_with_phones_lazy = combine_phones_lazy(basis_normalized_lazy, "Basis")
+        finacle_with_phones_lazy = combine_phones_lazy(finacle_normalized_lazy, "Finacle")
+
+        st.subheader("⬇️ Collecting Data for Matching")
+        basis_df = basis_with_phones_lazy.collect()
+        finacle_df = finacle_with_phones_lazy.collect()
+
+        st.subheader("✅ Performing Fuzzy Matching")
+        matches_df, mismatches_df = find_fuzzy_matches(basis_df, finacle_df)
+
+        st.subheader("✅ Fuzzy Matches (Potential Same Person)")
+        if not matches_df.empty:
+            st.dataframe(matches_df.head(100), use_container_width=True)
+            output_matches = io.BytesIO()
+            with pd.ExcelWriter(output_matches, engine="openpyxl") as writer:
+                matches_df.to_excel(writer, index=False, sheet_name="Fuzzy_Matches")
+            st.download_button(
+                label="📥 Download Fuzzy Matches (Excel)",
+                data=output_matches.getvalue(),
+                file_name="fuzzy_matches.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No fuzzy matches found based on the defined thresholds.")
+
+        st.subheader("💔 Mismatches (No Significant Fuzzy Match)")
+        if not mismatches_df.empty:
+            st.dataframe(mismatches_df.head(100), use_container_width=True)
+            output_mismatches = io.BytesIO()
+            with pd.ExcelWriter(output_mismatches, engine="openpyxl") as writer:
+                mismatches_df.to_excel(writer, index=False, sheet_name="Mismatches")
+            st.download_button(
+                label="📥 Download Mismatches (Excel)",
+                data=output_mismatches.getvalue(),
+                file_name="fuzzy_mismatches.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No significant mismatches found.")
+
+    except Exception as e:
+        st.error(f"❌ Error processing files: {e}")
