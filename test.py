@@ -3,35 +3,35 @@ import polars as pl
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Finacle vs Basis Bio-Data Comparison", layout="wide")
-st.title("🧬 Finacle vs Basis Bio-Data Comparator")
+st.set_page_config(page_title="Finacle vs Basis Bio-Data Mismatch on Name", layout="wide")
+st.title("⚠️ Finacle vs Basis Bio-Data Mismatch Finder (Same Name)")
 
 # === 1. Preprocessing Functions ===
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
         "CUS_SHO_NAME": "Name",
-        "EMAIL": "Email",
-        "BIR_DATE": "Date_of_Birth",
-        "TEL_NUM": "Phone_1",
-        "TEL_NUM_2": "Phone_2",
-        "FAX_NUM": "Phone_3"
+        "EMAIL": "Email_Basis",
+        "BIR_DATE": "Date_of_Birth_Basis",
+        "TEL_NUM": "Phone_1_Basis",
+        "TEL_NUM_2": "Phone_2_Basis",
+        "FAX_NUM": "Phone_3_Basis"
     })
     return df.select([
-        "Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"
+        "Name", "Email_Basis", "Date_of_Birth_Basis", "Phone_1_Basis", "Phone_2_Basis", "Phone_3_Basis"
     ])
 
 def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
         "NAME": "Name",
-        "PREFERREDEMAIL": "Email",
-        "CUST_DOB": "Date_of_Birth",
-        "PREFERREDPHONE": "Phone_1",
-        "SMSBANKINGMOBILENUMBER": "Phone_2"
+        "PREFERREDEMAIL": "Email_Finacle",
+        "CUST_DOB": "Date_of_Birth_Finacle",
+        "PREFERREDPHONE": "Phone_1_Finacle",
+        "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
     })
-    df = df.with_columns(pl.lit("").alias("Phone_3"))
+    df = df.with_columns(pl.lit("").alias("Phone_3_Finacle"))
     return df.select([
-        "Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"
+        "Name", "Email_Finacle", "Date_of_Birth_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"
     ])
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
@@ -43,55 +43,48 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
             )
     return df
 
-def combine_phones(df: pl.DataFrame) -> pl.DataFrame:
+def combine_phones(df: pl.DataFrame, prefix: str) -> pl.DataFrame:
     # Fill nulls and cast phones to string
     df = df.with_columns([
-        pl.col("Phone_1").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_2").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_3").fill_null("").cast(pl.Utf8)
+        pl.col(f"Phone_1_{prefix}").fill_null("").cast(pl.Utf8),
+        pl.col(f"Phone_2_{prefix}").fill_null("").cast(pl.Utf8),
+        pl.col(f"Phone_3_{prefix}").fill_null("").cast(pl.Utf8)
     ])
     # Create a list column of phones
     df = df.with_columns(
-        pl.concat_list(["Phone_1", "Phone_2", "Phone_3"]).alias("Phones")
-    )
-    return df.drop(["Phone_1", "Phone_2", "Phone_3"])
+        pl.concat_list([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"]).alias(f"Phones_{prefix}")
+    ).drop([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"])
+    return df
 
-def compare_bio_data(basis_df: pl.DataFrame, finacle_df: pl.DataFrame) -> pd.DataFrame:
+def find_bio_data_mismatches_on_name(basis_df: pl.DataFrame, finacle_df: pl.DataFrame) -> pd.DataFrame:
     # Normalize both dataframes
     basis_normalized = normalize(basis_df)
     finacle_normalized = normalize(finacle_df)
 
-    # Combine phone numbers into a list for comparison
-    basis_with_phones = combine_phones(basis_normalized)
-    finacle_with_phones = combine_phones(finacle_normalized)
+    # Combine phone numbers into a list
+    basis_with_phones = combine_phones(basis_normalized, "Basis")
+    finacle_with_phones = combine_phones(finacle_normalized, "Finacle")
 
-    # Outer join on Name, Email, and Date of Birth
+    # Inner join on Name
     merged_df = basis_with_phones.join(
         finacle_with_phones,
-        on=["Name", "Email", "Date_of_Birth"],
-        how="outer",
-        suffix="_finacle"
+        on=["Name"],
+        how="inner"
     )
 
-    # Function to check if phone lists are the same (ignoring order)
-    def are_phones_same(row):
-        basis_phones = set(row.get("Phones") or [])
-        finacle_phones = set(row.get("Phones_finacle") or [])
-        return basis_phones == finacle_phones
-
-    # Apply the phone comparison and flag mismatches
+    # Identify mismatches in other bio-data fields
     mismatched_df = merged_df.filter(
-        (pl.col("Name").is_not_null()) & (pl.col("Email").is_not_null()) & (pl.col("Date_of_Birth").is_not_null()) &
-        (
-            (pl.col("Phones").fill_null(pl.Series([[]])).list.sort() != pl.col("Phones_finacle").fill_null(pl.Series([[]])).list.sort()) |
-            (pl.col("Phones").is_null() != pl.col("Phones_finacle").is_null()) # Handle cases where one side has no phones
-        )
+        (pl.col("Email_Basis") != pl.col("Email_Finacle")) |
+        (pl.col("Date_of_Birth_Basis") != pl.col("Date_of_Birth_Finacle")) |
+        (pl.col("Phones_Basis").list.sort() != pl.col("Phones_Finacle").list.sort())
     ).select([
         "Name",
-        "Email",
-        "Date_of_Birth",
-        pl.col("Phones").alias("Basis_Phones"),
-        pl.col("Phones_finacle").alias("Finacle_Phones")
+        "Email_Basis",
+        "Email_Finacle",
+        "Date_of_Birth_Basis",
+        "Date_of_Birth_Finacle",
+        pl.col("Phones_Basis"),
+        pl.col("Phones_Finacle")
     ]).to_pandas()
 
     return mismatched_df
@@ -120,10 +113,10 @@ if basis_file and finacle_file:
         basis_processed = preprocess_basis(basis_df)
         finacle_processed = preprocess_finacle(finacle_df)
 
-        # Compare bio-data
-        mismatched_bio_data_df = compare_bio_data(basis_processed, finacle_processed)
+        # Find bio-data mismatches based on matching names
+        mismatched_bio_data_df = find_bio_data_mismatches_on_name(basis_processed, finacle_processed)
 
-        st.subheader("❌ Bio-Data Mismatches (Name, Email, DOB, Phone)")
+        st.subheader("🔥 Bio-Data Mismatches (Same Name, Different Other Info)")
 
         if not mismatched_bio_data_df.empty:
             st.dataframe(mismatched_bio_data_df, use_container_width=True)
@@ -136,11 +129,11 @@ if basis_file and finacle_file:
             st.download_button(
                 label="📥 Download Bio-Data Mismatches (Excel)",
                 data=output.getvalue(),
-                file_name="bio_data_mismatches.xlsx",
+                file_name="bio_data_mismatches_same_name.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.success("✅ No bio-data mismatches found between Finacle and Basis based on Name, Email, Date of Birth, and Phone Number.")
+            st.success("✅ No bio-data mismatches found for records with the same name between Finacle and Basis.")
 
     except Exception as e:
         st.error(f"❌ Error processing files: {e}")
