@@ -167,21 +167,12 @@ with col2:
 
 if basis_file and finacle_file:
     try:
-        # Read files using Polars, explicitly setting schema_overrides for 'PREFERREDPHONE' as Utf8
-        finacle_df = None
-        if finacle_file.name.endswith("xlsx"):
-            finacle_df = pl.read_excel(finacle_file)
-        else:
-            try:
-                finacle_df = pl.read_csv(
-                    finacle_file,
-                    schema_overrides={"PREFERREDPHONE": pl.Utf8}
-                )
-            except Exception as e:
-                st.error(f"Error reading CSV with schema override: {e}")
-                return
-
+        # Read files using Polars
         basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
+        finacle_df = pl.read_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.read_csv(
+            finacle_file,
+            schema_overrides={"PREFERREDPHONE": pl.Utf8}
+        )
 
         st.subheader("📄 Uploaded Summary")
         st.write(f"🔹 BASIS Rows: {basis_df.height}")
