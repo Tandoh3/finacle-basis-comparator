@@ -16,7 +16,6 @@ def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     }).select(["BRA_CODE", "CUS_NUM", "Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"])
 
 def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
-    st.write("Finacle Columns:", df.columns)
     df = df.rename({
         "NAME": "Name",
         "PREFERREDEMAIL": "Email",
@@ -33,8 +32,11 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
             df = df.with_columns(pl.col(col).str.strip_chars().str.to_lowercase().alias(col))
     return df
 
-basis_file = st.file_uploader("Upload BASIS File", type=["csv", "xlsx"])
-finacle_file = st.file_uploader("Upload FINACLE File", type=["csv", "xlsx"])
+col1, col2 = st.columns(2)
+with col1:
+    basis_file = st.file_uploader("📥 Upload BASIS File", type=["csv", "xlsx"])
+with col2:
+    finacle_file = st.file_uploader("📥 Upload FINACLE File", type=["csv", "xlsx"])
 
 if basis_file and finacle_file:
     try:
@@ -44,7 +46,6 @@ if basis_file and finacle_file:
         basis = normalize(preprocess_basis(basis_df))
         finacle = normalize(preprocess_finacle(finacle_df))
 
-        # Fill phone nulls
         basis = basis.with_columns([
             pl.col("Phone_1").fill_null(""),
             pl.col("Phone_2").fill_null(""),
@@ -56,7 +57,7 @@ if basis_file and finacle_file:
             pl.col("Phone_3").fill_null("")
         ])
 
-        # Join on Name, Email, DOB
+        # Outer join on Name, Email, DOB to find mismatches on presence and phones
         merged = basis.join(finacle, on=["Name", "Email", "Date_of_Birth"], how="outer", suffix="_finacle")
 
         merged = merged.with_columns([
@@ -68,7 +69,9 @@ if basis_file and finacle_file:
             pl.col("Phone_3_finacle").fill_null("")
         ])
 
-        # Define phone match: any phone overlap
+        # Convert to pandas for easier phone comparison logic
+        merged_pd = merged.to_pandas()
+
         def phones_match(row):
             basis_phones = {row["Phone_1"], row["Phone_2"], row["Phone_3"]}
             finacle_phones = {row["Phone_1_finacle"], row["Phone_2_finacle"], row["Phone_3_finacle"]}
@@ -76,14 +79,13 @@ if basis_file and finacle_file:
             finacle_phones.discard("")
             return len(basis_phones.intersection(finacle_phones)) > 0
 
-        merged_pd = merged.to_pandas()
         merged_pd["Phone_Match"] = merged_pd.apply(phones_match, axis=1)
 
-        # Mismatches = missing in either OR phones do not match
+        # Identify mismatches: missing record on either side or phones don't match
         mismatch = merged_pd[
-            merged_pd["BRA_CODE"].isnull() |
-            merged_pd["ORGKEY"].isnull() |
-            (~merged_pd["Phone_Match"])
+            merged_pd["BRA_CODE"].isnull() |   # Missing in Basis
+            merged_pd["ORGKEY"].isnull() |    # Missing in Finacle
+            (~merged_pd["Phone_Match"])        # Phone numbers don't overlap
         ]
 
         if mismatch.empty:
@@ -92,17 +94,16 @@ if basis_file and finacle_file:
             st.subheader("Mismatched Records")
             st.dataframe(mismatch)
 
-            # Excel download
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 mismatch.to_excel(writer, index=False, sheet_name="Mismatches")
 
             st.download_button(
-                label="Download Mismatches Excel",
+                label="📥 Download Mismatches Excel",
                 data=output.getvalue(),
                 file_name="mismatched_records.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"❌ Error processing files: {e}")
