@@ -75,7 +75,7 @@ def aggregate_person(df: pl.DataFrame, dataset_name: str) -> pl.DataFrame:
     df_with_phones = df.join(phones_exploded, on=["Name", "Email", "Date_of_Birth"], how="left")
 
     # Aggregate unique phones, unique keys, and record counts
-    agg = df_with_phones.groupby(["Name", "Email", "Date_of_Birth"]).agg([
+    agg = df_with_phones.group_by(["Name", "Email", "Date_of_Birth"]).agg([
         pl.col("Phone_Normalized").unique().alias("Unique_Phones"),
         pl.col("UniqueKey").unique().alias(f"{dataset_name}_UniqueKeys"),
         pl.count().alias(f"{dataset_name}_RecordCount"),
@@ -99,18 +99,10 @@ def compare_aggregated(basis_agg: pl.DataFrame, finacle_agg: pl.DataFrame) -> pd
         pl.col("Date_of_Birth").fill_null("")
     ])
 
-    # Compare phones (set equality) using Python sets
-    def phones_equal(row):
-        set_basis = set(row["Unique_Phones"])
-        set_finacle = set(row["Unique_Phones_finacle"])
-        return set_basis == set_finacle
-
-    # Apply the phone comparison
+    # Compare phones (set equality) and unique key counts
     mismatches = joined.filter(
         ~(pl.col("Unique_Phones").list.sort() == pl.col("Unique_Phones_finacle").list.sort()) |
-        (pl.col("Basis_UniqueKeys").list.len() != pl.col("Finacle_UniqueKeys").list.len()) |
-        (pl.col("Basis_UniqueKeys").list.len().fill_null(0) == 0) |
-        (pl.col("Finacle_UniqueKeys").list.len().fill_null(0) == 0)
+        (pl.col("Basis_UniqueKeys").list.len() != pl.col("Finacle_UniqueKeys").list.len())
     ).to_pandas()
 
     return mismatches
