@@ -23,7 +23,7 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         "PREFERREDEMAIL": "Email",
         "CUST_DOB": "Date of Birth",
         "PREFERREDPHONE": "Phone_1",
-        "SMSBANKINGMOBILEUMBER": "Phone_2"
+        "SMSBANKINGMOBILENUMBER": "Phone_2"
     })
     df = df.with_columns(pl.lit("").alias("Phone_3"))
     return df.select(["Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"])
