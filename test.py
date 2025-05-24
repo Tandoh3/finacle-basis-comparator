@@ -3,105 +3,144 @@ import polars as pl
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Finacle vs Basis Comparator", layout="wide")
-st.title("🔍 Finacle vs Basis Comparison Tool")
+st.set_page_config(page_title="Finacle vs Basis Comparison Tool", layout="wide")
+st.title("📊 Finacle vs Basis Record Comparator")
 
-# Uploads
+# Function to preprocess and standardize column names
+def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
+    return df.rename({
+        "Cus_sho_name": "Name",
+        "EMAIL": "Email",
+        "BIR_DATE": "Date of Birth",
+        "TEL_NUM": "Phone_1",
+        "TEL_NUM_2": "Phone_2",
+        "FAX_NUM": "Phone_3"
+    }).select(["Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"])
+
+def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
+    return df.rename({
+        "Name": "Name",
+        "Preferredemail": "Email",
+        "Cust_Dob": "Date of Birth",
+        "PrefferedPhonenumber": "Phone_1",
+        "SMSBankingMobileNumber": "Phone_2"
+    }).with_columns([
+        pl.lit(None).alias("Phone_3")
+    ]).select(["Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"])
+
+# Function to normalize strings
+def normalize_string(s):
+    return s.strip().lower() if isinstance(s, str) else s
+
+# Comparison logic
+def compare_rows(row_basis, row_finacle):
+    result = {}
+    for col in ["Name", "Email", "Date of Birth"]:
+        result[col] = row_basis[col] == row_finacle[col]
+
+    # Compare phones (match if any phone matches)
+    basis_phones = {row_basis["Phone_1"], row_basis["Phone_2"], row_basis["Phone_3"]}
+    finacle_phones = {row_finacle["Phone_1"], row_finacle["Phone_2"], row_finacle["Phone_3"]}
+    result["Phone"] = not basis_phones.isdisjoint(finacle_phones)
+
+    return result
+
+# Color cell background
+def color_cell(val, match):
+    color = "lightgreen" if match else "lightcoral"
+    return f"background-color: {color}"
+
+# Upload files
 col1, col2 = st.columns(2)
 with col1:
-    finacle_file = st.file_uploader("📂 Upload Finacle File", type=["csv", "xlsx"])
+    basis_file = st.file_uploader("📥 Upload BASIS File", type=["csv", "xlsx"], key="basis")
 with col2:
-    basis_file = st.file_uploader("📂 Upload Basis File", type=["csv", "xlsx"])
+    finacle_file = st.file_uploader("📥 Upload FINACLE File", type=["csv", "xlsx"], key="finacle")
 
-# Helper for reading Excel or CSV
-def read_file(file):
-    if file.name.endswith(".xlsx"):
-        return pl.read_excel(file)
-    return pl.read_csv(file)
+if basis_file and finacle_file:
+    try:
+        # Read files using pandas for compatibility
+        if basis_file.name.endswith(".csv"):
+            basis_raw = pl.read_csv(basis_file)
+        else:
+            basis_raw = pl.read_excel(basis_file)
 
-# Normalize phone string
-def normalize(phone):
-    return str(phone).lower().replace(" ", "").replace("-", "").strip()
+        if finacle_file.name.endswith(".csv"):
+            finacle_raw = pl.read_csv(finacle_file)
+        else:
+            finacle_raw = pl.read_excel(finacle_file)
 
-# Check if any phone matches
-def phones_match(phone1, phone2):
-    set1 = set(normalize(phone1).split("|"))
-    set2 = set(normalize(phone2).split("|"))
-    return not set1.isdisjoint(set2)
+        # Show total rows uploaded
+        st.subheader("📄 Uploaded File Summary")
+        st.write(f"🔹 BASIS Rows: {basis_raw.height}")
+        st.write(f"🔹 FINACLE Rows: {finacle_raw.height}")
 
-# Row-level mismatch check
-def is_mismatch(row):
-    if row["Name_Finacle"].strip().lower() != row["Name_Basis"].strip().lower():
-        return True
-    if row["Email_Finacle"].strip().lower() != row["Email_Basis"].strip().lower():
-        return True
-    if row["Date of Birth_Finacle"].strip().lower() != row["Date of Birth_Basis"].strip().lower():
-        return True
-    if not phones_match(row["Phone_Finacle"], row["Phone_Basis"]):
-        return True
-    return False
+        # Preprocess both files
+        basis = preprocess_basis(basis_raw).with_columns(
+            [pl.col(col).cast(pl.Utf8).str.strip_chars().str.to_lowercase() for col in basis_raw.columns if col]
+        )
+        finacle = preprocess_finacle(finacle_raw).with_columns(
+            [pl.col(col).cast(pl.Utf8).str.strip_chars().str.to_lowercase() for col in finacle_raw.columns if col]
+        )
 
-# Styling mismatches
-def highlight_mismatches(row):
-    styles = []
-    for field in ["Name", "Email", "Date of Birth"]:
-        val1 = row[f"{field}_Finacle"].strip().lower()
-        val2 = row[f"{field}_Basis"].strip().lower()
-        match = val1 == val2
-        color = "lightgreen" if match else "salmon"
-        styles.extend([f"background-color: {color}"] * 2)
+        # Ensure same length or align by index
+        min_len = min(basis.height, finacle.height)
+        basis = basis.slice(0, min_len)
+        finacle = finacle.slice(0, min_len)
 
-    # Phone comparison
-    match = phones_match(row["Phone_Finacle"], row["Phone_Basis"])
-    color = "lightgreen" if match else "salmon"
-    styles.extend([f"background-color: {color}"] * 2)
+        # Compare each row
+        comparison_results = []
+        mismatch_rows = []
 
-    return styles
+        for i in range(min_len):
+            row_b = basis.row(i, named=True)
+            row_f = finacle.row(i, named=True)
+            match_result = compare_rows(row_b, row_f)
+            comparison_results.append(match_result)
+            if not all(match_result.values()):
+                mismatch_rows.append({
+                    "Name_Basis": row_b["Name"],
+                    "Name_Finacle": row_f["Name"],
+                    "Email_Basis": row_b["Email"],
+                    "Email_Finacle": row_f["Email"],
+                    "DOB_Basis": row_b["Date of Birth"],
+                    "DOB_Finacle": row_f["Date of Birth"],
+                    "Phone_Basis": ", ".join(filter(None, [row_b["Phone_1"], row_b["Phone_2"], row_b["Phone_3"]])),
+                    "Phone_Finacle": ", ".join(filter(None, [row_f["Phone_1"], row_f["Phone_2"], row_f["Phone_3"]]))
+                })
 
-# Process files
-if finacle_file and basis_file:
-    # Load
-    finacle = read_file(finacle_file)
-    basis = read_file(basis_file)
+        st.subheader("🔍 Mismatched Records")
+        if mismatch_rows:
+            mismatch_df = pd.DataFrame(mismatch_rows)
 
-    st.success(f"✅ Finacle rows: {finacle.shape[0]}")
-    st.success(f"✅ Basis rows: {basis.shape[0]}")
+            def highlight_mismatches(row):
+                styles = []
+                for b, f in [
+                    ("Name_Basis", "Name_Finacle"),
+                    ("Email_Basis", "Email_Finacle"),
+                    ("DOB_Basis", "DOB_Finacle"),
+                    ("Phone_Basis", "Phone_Finacle"),
+                ]:
+                    match = str(row[b]).strip().lower() == str(row[f]).strip().lower()
+                    styles.append("background-color: lightgreen" if match else "background-color: lightcoral")
+                    styles.append("background-color: lightgreen" if match else "background-color: lightcoral")
+                return styles
 
-    # Rename columns explicitly
-    finacle = finacle.with_columns([
-        pl.col("NAME").cast(str).fill_null("").alias("Name_Finacle"),
-        pl.col("PREFERREDEMAIL").cast(str).fill_null("").alias("Email_Finacle"),
-        pl.col("CUST_DOB").cast(str).fill_null("").alias("Date of Birth_Finacle"),
-        (pl.col("PREFERREDPHONE").cast(str).fill_null("") + "|" + pl.col("SMSBANKINGMOBILENUMBER").cast(str).fill_null("")).alias("Phone_Finacle")
-    ])
+            styled_df = mismatch_df.style.apply(highlight_mismatches, axis=1)
+            st.dataframe(styled_df, use_container_width=True)
 
-    basis = basis.with_columns([
-        pl.col("CUS_SHO_NAME").cast(str).fill_null("").alias("Name_Basis"),
-        pl.col("EMAIL").cast(str).fill_null("").alias("Email_Basis"),
-        pl.col("BIR_DATE").cast(str).fill_null("").alias("Date of Birth_Basis"),
-        (pl.col("TEL_NUM").cast(str).fill_null("") + "|" +
-         pl.col("TEL_NUM_2").cast(str).fill_null("") + "|" +
-         pl.col("FAX_NUM").cast(str).fill_null("")).alias("Phone_Basis")
-    ])
+            # Download button
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                mismatch_df.to_excel(writer, index=False, sheet_name="Mismatches")
+            st.download_button(
+                label="📥 Download Mismatches as Excel",
+                data=output.getvalue(),
+                file_name="finacle_basis_mismatches.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.success("✅ No mismatches found!")
 
-    # Select needed columns
-    finacle_clean = finacle.select([col for col in finacle.columns if col.endswith("_Finacle")])
-    basis_clean = basis.select([col for col in basis.columns if col.endswith("_Basis")])
-
-    # Combine
-    combined = pl.concat([basis_clean, finacle_clean], how="horizontal").to_pandas()
-
-    # Mismatch filter
-    combined["Mismatch"] = combined.apply(is_mismatch, axis=1)
-    mismatches = combined[combined["Mismatch"]].drop(columns=["Mismatch"])
-
-    st.subheader("❌ Mismatches Only")
-    styled_df = mismatches.style.apply(highlight_mismatches, axis=1)
-    st.dataframe(styled_df, use_container_width=True)
-
-    # Excel download
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        mismatches.to_excel(writer, index=False, sheet_name="Mismatches")
-        writer.save()
-    st.download_button("📥 Download Mismatches as Excel", data=output.getvalue(), file_name="finacle_vs_basis_mismatches.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except Exception as e:
+        st.error(f"❌ Error processing files: {e}")
