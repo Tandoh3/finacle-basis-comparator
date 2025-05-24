@@ -4,4 +4,4 @@ pandas
 openpyxl
 dask
 duckdb
-fuzz
+thefuzz[speedup]
