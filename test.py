@@ -3,7 +3,10 @@ import polars as pl
 import pandas as pd
 import io
 
-st.title("Person-level Data Validation by Composite Key")
+st.set_page_config(page_title="Finacle vs Basis Comparison Tool", layout="wide")
+st.title("📊 Finacle vs Basis Comparator (Large Dataset Support)")
+
+# === 1. Preprocessing Functions ===
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
@@ -15,28 +18,24 @@ def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
         "FAX_NUM": "Phone_3"
     }).select(["Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"])
 
-    # Normalize text columns
+    # Cast to string first
+    for col in ["Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"]:
+        if col in df.columns:
+            df = df.with_columns(pl.col(col).cast(pl.Utf8))
+
+    # Normalize and clean
     for col in ["Name", "Email"]:
-        if col in df.columns:
-            df = df.with_columns(pl.col(col).str.strip_chars().str.to_lowercase().alias(col))
-
-    # Normalize phone columns (remove spaces/dashes)
+        df = df.with_columns(pl.col(col).str.strip_chars().str.to_lowercase())
     for col in ["Phone_1", "Phone_2", "Phone_3"]:
-        if col in df.columns:
-            df = df.with_columns(pl.col(col).str.replace_all(r"\D", "").alias(col))
+        df = df.with_columns(pl.col(col).str.replace_all(r"\D", ""))
 
-    # Format DOB as string to avoid type mismatch
-    if "Date_of_Birth" in df.columns:
-        df = df.with_columns(pl.col("Date_of_Birth").cast(pl.Utf8))
-
-    # Create composite key by concatenating fields (empty if missing)
+    # Composite key to identify the person
     df = df.with_columns(
         (pl.col("Name").fill_null("") + "|" +
          pl.col("Email").fill_null("") + "|" +
          pl.col("Date_of_Birth").fill_null("") + "|" +
          pl.col("Phone_1").fill_null("")).alias("Composite_Key")
     )
-
     return df
 
 def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
@@ -47,21 +46,20 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         "PREFERREDPHONE": "Phone_1",
         "SMSBANKINGMOBILENUMBER": "Phone_2"
     })
-
     df = df.with_columns(pl.lit("").alias("Phone_3"))
 
-    # Normalize like basis
+    # Cast to string first
+    for col in ["Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"]:
+        if col in df.columns:
+            df = df.with_columns(pl.col(col).cast(pl.Utf8))
+
+    # Normalize and clean
     for col in ["Name", "Email"]:
-        if col in df.columns:
-            df = df.with_columns(pl.col(col).str.strip_chars().str.to_lowercase().alias(col))
-
+        df = df.with_columns(pl.col(col).str.strip_chars().str.to_lowercase())
     for col in ["Phone_1", "Phone_2", "Phone_3"]:
-        if col in df.columns:
-            df = df.with_columns(pl.col(col).str.replace_all(r"\D", "").alias(col))
+        df = df.with_columns(pl.col(col).str.replace_all(r"\D", ""))
 
-    if "Date_of_Birth" in df.columns:
-        df = df.with_columns(pl.col("Date_of_Birth").cast(pl.Utf8))
-
+    # Composite key
     df = df.with_columns(
         (pl.col("Name").fill_null("") + "|" +
          pl.col("Email").fill_null("") + "|" +
@@ -70,88 +68,144 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
     )
     return df.select(["Composite_Key", "Name", "Email", "Date_of_Birth", "Phone_1", "Phone_2", "Phone_3"])
 
-def aggregate_person_data(df: pl.DataFrame) -> pd.DataFrame:
-    pdf = df.to_pandas()
-
-    def unique_set(series):
-        s = set(series.dropna().astype(str).str.strip())
-        s.discard("")
-        return s
-
-    agg = pdf.groupby("Composite_Key").agg({
-        "Name": unique_set,
-        "Email": unique_set,
-        "Date_of_Birth": unique_set,
-        "Phone_1": unique_set,
-        "Phone_2": unique_set,
-        "Phone_3": unique_set,
-    }).reset_index()
-
-    # Combine phones
-    agg["Phones"] = agg.apply(lambda r: r["Phone_1"].union(r["Phone_2"]).union(r["Phone_3"]), axis=1)
-    agg = agg.drop(columns=["Phone_1", "Phone_2", "Phone_3"])
-
-    return agg
-
+# === 2. Upload Section ===
 col1, col2 = st.columns(2)
 with col1:
-    basis_file = st.file_uploader("Upload BASIS File", type=["csv", "xlsx"])
+    basis_file = st.file_uploader("📥 Upload BASIS File (CSV/XLSX)", type=["csv", "xlsx"], key="basis")
 with col2:
-    finacle_file = st.file_uploader("Upload FINACLE File", type=["csv", "xlsx"])
+    finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV/XLSX)", type=["csv", "xlsx"], key="finacle")
+
+# === 3. Processing Logic ===
 
 if basis_file and finacle_file:
     try:
-        basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
-        finacle_df = pl.read_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.read_csv(finacle_file)
+        # Read files with Polars
+        if basis_file.name.endswith("xlsx"):
+            basis_df = pl.read_excel(basis_file)
+        else:
+            basis_df = pl.read_csv(basis_file)
 
+        if finacle_file.name.endswith("xlsx"):
+            finacle_df = pl.read_excel(finacle_file)
+        else:
+            finacle_df = pl.read_csv(finacle_file)
+
+        st.subheader("📄 Uploaded Summary")
+        st.write(f"🔹 BASIS Rows: {basis_df.height}")
+        st.write(f"🔹 FINACLE Rows: {finacle_df.height}")
+
+        # Preprocess and normalize data
         basis = preprocess_basis(basis_df)
         finacle = preprocess_finacle(finacle_df)
 
-        basis_agg = aggregate_person_data(basis)
-        finacle_agg = aggregate_person_data(finacle)
+        # Group by Composite_Key to aggregate data for each unique person
+        basis_grouped = basis.groupby("Composite_Key").agg([
+            pl.first("Name").alias("Name"),
+            pl.first("Email").alias("Email"),
+            pl.first("Date_of_Birth").alias("Date_of_Birth"),
+            pl.unique(pl.concat_list(["Phone_1", "Phone_2", "Phone_3"])).alias("Phones")
+        ])
 
-        # Merge on Composite_Key
-        merged = pd.merge(basis_agg, finacle_agg, on="Composite_Key", how="outer", suffixes=("_basis", "_finacle"))
+        finacle_grouped = finacle.groupby("Composite_Key").agg([
+            pl.first("Name").alias("Name"),
+            pl.first("Email").alias("Email"),
+            pl.first("Date_of_Birth").alias("Date_of_Birth"),
+            pl.unique(pl.concat_list(["Phone_1", "Phone_2", "Phone_3"])).alias("Phones")
+        ])
 
-        def sets_match(set1, set2):
-            if pd.isna(set1) or pd.isna(set2):
-                return False
-            return set1 == set2
+        # Join on Composite_Key with full outer join to find mismatches
+        joined = basis_grouped.join(finacle_grouped, on="Composite_Key", how="outer", suffix="_finacle")
 
-        def compare_row(row):
-            mismatches = {}
-            for field in ["Name", "Email", "Date_of_Birth", "Phones"]:
-                val_basis = row.get(f"{field}_basis", set())
-                val_finacle = row.get(f"{field}_finacle", set())
-                if not sets_match(val_basis, val_finacle):
-                    mismatches[field] = (val_basis, val_finacle)
-            return mismatches
+        # Function to compare phones lists (set equality)
+        def phones_match(basis_phones, finacle_phones):
+            basis_set = set(basis_phones) if basis_phones is not None else set()
+            finacle_set = set(finacle_phones) if finacle_phones is not None else set()
+            # Remove empty strings from sets
+            basis_set.discard("")
+            finacle_set.discard("")
+            return basis_set == finacle_set
 
-        merged["Mismatches"] = merged.apply(compare_row, axis=1)
-        mismatched_rows = merged[merged["Mismatches"].map(bool)]
+        # Build mismatch flags
+        mismatch_flags = []
 
-        if mismatched_rows.empty:
-            st.success("✅ All composite keys match between BASIS and FINACLE!")
-        else:
-            st.subheader("Mismatched Persons by Composite Key")
+        for row in joined.iter_rows(named=True):
+            # Extract fields safely
+            basis_name = row.get("Name")
+            finacle_name = row.get("Name_finacle")
 
-            def format_mismatch(row):
-                parts = []
-                for field, (basis_val, finacle_val) in row["Mismatches"].items():
-                    parts.append(f"**{field}**\nBASIS: {basis_val}\nFINACLE: {finacle_val}")
-                return "\n\n".join(parts)
+            basis_email = row.get("Email")
+            finacle_email = row.get("Email_finacle")
 
-            mismatched_rows["Mismatch_Details"] = mismatched_rows.apply(format_mismatch, axis=1)
-            st.dataframe(mismatched_rows[["Composite_Key", "Mismatch_Details"]])
+            basis_dob = row.get("Date_of_Birth")
+            finacle_dob = row.get("Date_of_Birth_finacle")
 
+            basis_phones = row.get("Phones") or []
+            finacle_phones = row.get("Phones_finacle") or []
+
+            name_match = (basis_name == finacle_name)
+            email_match = (basis_email == finacle_email)
+            dob_match = (basis_dob == finacle_dob)
+            phone_match = phones_match(basis_phones, finacle_phones)
+
+            mismatch_flags.append({
+                "Composite_Key": row["Composite_Key"],
+                "Name_Basis": basis_name,
+                "Name_Finacle": finacle_name,
+                "Email_Basis": basis_email,
+                "Email_Finacle": finacle_email,
+                "DOB_Basis": basis_dob,
+                "DOB_Finacle": finacle_dob,
+                "Phones_Basis": ", ".join(basis_phones),
+                "Phones_Finacle": ", ".join(finacle_phones),
+                "Name_Match": name_match,
+                "Email_Match": email_match,
+                "DOB_Match": dob_match,
+                "Phone_Match": phone_match,
+                "All_Match": name_match and email_match and dob_match and phone_match,
+            })
+
+        mismatch_df = pl.from_dicts(mismatch_flags)
+
+        # Filter mismatches
+        mismatches = mismatch_df.filter(pl.col("All_Match") == False)
+
+        st.subheader("🔍 Mismatched Records Summary")
+
+        if mismatches.height > 0:
+            # Show mismatches in two columns
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Basis Data**")
+                st.dataframe(
+                    mismatches.select([
+                        "Name_Basis", "Email_Basis", "DOB_Basis", "Phones_Basis",
+                        "Name_Match", "Email_Match", "DOB_Match", "Phone_Match"
+                    ]).to_pandas(),
+                    use_container_width=True
+                )
+            with col2:
+                st.write("**Finacle Data**")
+                st.dataframe(
+                    mismatches.select([
+                        "Name_Finacle", "Email_Finacle", "DOB_Finacle", "Phones_Finacle",
+                        "Name_Match", "Email_Match", "DOB_Match", "Phone_Match"
+                    ]).to_pandas(),
+                    use_container_width=True
+                )
+
+            # Download option for full mismatch report
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                mismatched_rows[["Composite_Key", "Mismatch_Details"]].to_excel(writer, index=False)
+                mismatches.to_pandas().to_excel(writer, index=False, sheet_name="Mismatches")
+
             st.download_button(
-                "Download mismatches as Excel",
+                label="📥 Download Mismatch Report (Excel)",
                 data=output.getvalue(),
-                file_name="mismatched_composite_keys.xlsx",
+                file_name="finacle_basis_mismatches.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+        else:
+            st.success("✅ All records match between Finacle and Basis!")
+
     except Exception as e:
-        st.error(f"Error processing files: {e}")
+        st.error(f"❌ Error processing files: {e}")
