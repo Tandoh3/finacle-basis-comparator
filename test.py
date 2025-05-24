@@ -3,8 +3,8 @@ import polars as pl
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Finacle vs Basis Bio-Data Mismatch on Name", layout="wide")
-st.title("⚠️ Finacle vs Basis Bio-Data Mismatch Finder (Same Name)")
+st.set_page_config(page_title="Finacle vs Basis Bio-Data Matching", layout="wide")
+st.title("🔍 Finacle vs Basis Bio-Data Matching (Partial Match)")
 
 # === 1. Preprocessing Functions ===
 
@@ -56,38 +56,42 @@ def combine_phones(df: pl.DataFrame, prefix: str) -> pl.DataFrame:
     ).drop([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"])
     return df
 
-def find_bio_data_mismatches_on_name(basis_df: pl.DataFrame, finacle_df: pl.DataFrame) -> pd.DataFrame:
+def find_potential_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame) -> pd.DataFrame:
     # Normalize both dataframes
     basis_normalized = normalize(basis_df)
     finacle_normalized = normalize(finacle_df)
 
-    # Combine phone numbers into a list
+    # Combine phone numbers
     basis_with_phones = combine_phones(basis_normalized, "Basis")
     finacle_with_phones = combine_phones(finacle_normalized, "Finacle")
 
-    # Inner join on Name
+    # Full outer join on Name
     merged_df = basis_with_phones.join(
         finacle_with_phones,
         on=["Name"],
-        how="inner"
+        how="outer"
     )
 
-    # Identify mismatches in other bio-data fields
-    mismatched_df = merged_df.filter(
-        (pl.col("Email_Basis") != pl.col("Email_Finacle")) |
-        (pl.col("Date_of_Birth_Basis") != pl.col("Date_of_Birth_Finacle")) |
-        (pl.col("Phones_Basis").list.sort() != pl.col("Phones_Finacle").list.sort())
-    ).select([
-        "Name",
-        "Email_Basis",
-        "Email_Finacle",
-        "Date_of_Birth_Basis",
-        "Date_of_Birth_Finacle",
-        pl.col("Phones_Basis"),
-        pl.col("Phones_Finacle")
-    ]).to_pandas()
+    def check_partial_match(row):
+        matches = 0
+        if row["Email_Basis"] and row["Email_Finacle"] and row["Email_Basis"] == row["Email_Finacle"]:
+            matches += 1
+        if row["Date_of_Birth_Basis"] and row["Date_of_Birth_Finacle"] and row["Date_of_Birth_Basis"] == row["Date_of_Birth_Finacle"]:
+            matches += 1
+        basis_phones = set(row.get("Phones_Basis") or [])
+        finacle_phones = set(row.get("Phones_Finacle") or [])
+        if basis_phones and finacle_phones and basis_phones == finacle_phones:
+            matches += 1
+        return matches
 
-    return mismatched_df
+    pdf = merged_df.to_pandas()
+    pdf["Partial_Match_Count"] = pdf.apply(check_partial_match, axis=1)
+
+    # Separate potential matches and mismatches
+    potential_matches_df = pdf[pdf["Partial_Match_Count"] > 0]
+    mismatches_df = pdf[pdf["Partial_Match_Count"] == 0]
+
+    return potential_matches_df, mismatches_df
 
 # === 2. Upload Section ===
 
@@ -113,27 +117,38 @@ if basis_file and finacle_file:
         basis_processed = preprocess_basis(basis_df)
         finacle_processed = preprocess_finacle(finacle_df)
 
-        # Find bio-data mismatches based on matching names
-        mismatched_bio_data_df = find_bio_data_mismatches_on_name(basis_processed, finacle_processed)
+        # Find potential matches and mismatches
+        potential_matches, mismatches = find_potential_matches(basis_processed, finacle_processed)
 
-        st.subheader("🔥 Bio-Data Mismatches (Same Name, Different Other Info)")
-
-        if not mismatched_bio_data_df.empty:
-            st.dataframe(mismatched_bio_data_df, use_container_width=True)
-
-            # Export mismatches to Excel for download
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                mismatched_bio_data_df.to_excel(writer, index=False, sheet_name="Bio_Data_Mismatches")
-
+        st.subheader("🤝 Potential Matches (Same Name, Other Info Match)")
+        if not potential_matches.empty:
+            st.dataframe(potential_matches, use_container_width=True)
+            output_potential = io.BytesIO()
+            with pd.ExcelWriter(output_potential, engine="openpyxl") as writer:
+                potential_matches.to_excel(writer, index=False, sheet_name="Potential_Matches")
             st.download_button(
-                label="📥 Download Bio-Data Mismatches (Excel)",
-                data=output.getvalue(),
-                file_name="bio_data_mismatches_same_name.xlsx",
+                label="📥 Download Potential Matches (Excel)",
+                data=output_potential.getvalue(),
+                file_name="potential_matches.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.success("✅ No bio-data mismatches found for records with the same name between Finacle and Basis.")
+            st.info("No potential matches found based on the criteria.")
+
+        st.subheader("💔 Mismatches (No Other Info Match for Same Name)")
+        if not mismatches.empty:
+            st.dataframe(mismatches, use_container_width=True)
+            output_mismatches = io.BytesIO()
+            with pd.ExcelWriter(output_mismatches, engine="openpyxl") as writer:
+                mismatches.to_excel(writer, index=False, sheet_name="Mismatches")
+            st.download_button(
+                label="📥 Download Mismatches (Excel)",
+                data=output_mismatches.getvalue(),
+                file_name="bio_data_mismatches_no_other_match.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No mismatches found where the name is the same but other info differs.")
 
     except Exception as e:
         st.error(f"❌ Error processing files: {e}")
