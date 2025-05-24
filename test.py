@@ -28,11 +28,11 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         "CUST_DOB": "Date of Birth",
         "PREFERREDPHONE": "Phone_1",
         "SMSBANKINGMOBILENUMBER": "Phone_2",
-        "ORIGKEY": "ORIGKEY"
+        "ORGKEY": "ORGKEY"
     })
     df = df.with_columns(pl.lit("").alias("Phone_3"))
     return df.select([
-        "ORIGKEY", "Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"
+        "ORGKEY", "Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"
     ])
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
@@ -105,7 +105,7 @@ if basis_file and finacle_file:
         mismatches = pl.DataFrame({
             "BRA_CODE": raw_basis["BRA_CODE"],
             "Account_Number": raw_basis["Account_Number"],
-            "ORIGKEY": raw_finacle["ORIGKEY"],
+            "ORGKEY": raw_finacle["ORGKEY"],
             "Name_Basis": raw_basis["Name"],
             "Name_Finacle": raw_finacle["Name"],
             "Email_Basis": raw_basis["Email"],
