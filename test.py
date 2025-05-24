@@ -13,9 +13,13 @@ def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
         "BIR_DATE": "Date of Birth",
         "TEL_NUM": "Phone_1",
         "TEL_NUM_2": "Phone_2",
-        "FAX_NUM": "Phone_3"
+        "FAX_NUM": "Phone_3",
+        "CUS_NUM": "Account_Number",
+        "BRA_CODE": "BRA_CODE"
     })
-    return df.select(["Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"])
+    return df.select([
+        "BRA_CODE", "Account_Number", "Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"
+    ])
 
 def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
@@ -23,10 +27,13 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         "PREFERREDEMAIL": "Email",
         "CUST_DOB": "Date of Birth",
         "PREFERREDPHONE": "Phone_1",
-        "SMSBANKINGMOBILENUMBER": "Phone_2"
+        "SMSBANKINGMOBILENUMBER": "Phone_2",
+        "ORIGKEY": "ORIGKEY"
     })
     df = df.with_columns(pl.lit("").alias("Phone_3"))
-    return df.select(["Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"])
+    return df.select([
+        "ORIGKEY", "Name", "Email", "Date of Birth", "Phone_1", "Phone_2", "Phone_3"
+    ])
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns([
@@ -52,35 +59,42 @@ if basis_file and finacle_file:
         st.write(f"🔹 FINACLE Rows: {finacle_df.height}")
 
         # Preprocess and normalize
-        basis = normalize(preprocess_basis(basis_df))
-        finacle = normalize(preprocess_finacle(finacle_df))
+        raw_basis = preprocess_basis(basis_df)
+        raw_finacle = preprocess_finacle(finacle_df)
 
-        # Align both datasets by row index for now
+        basis = normalize(raw_basis)
+        finacle = normalize(raw_finacle)
+
+        # Align both datasets by row index
         min_len = min(basis.height, finacle.height)
         basis = basis.head(min_len)
         finacle = finacle.head(min_len)
+        raw_basis = raw_basis.head(min_len)
+        raw_finacle = raw_finacle.head(min_len)
 
-        # Compare non-phone columns
+        # Compare Name, Email, DOB
         comparison = pl.DataFrame({
             "Name_match": basis["Name"] == finacle["Name"],
             "Email_match": basis["Email"] == finacle["Email"],
             "DOB_match": basis["Date of Birth"] == finacle["Date of Birth"]
         })
 
-        # Phone matching: match if any phone overlaps
-        phone_match = (basis["Phone_1"].is_in(finacle["Phone_1"]) |
-                       basis["Phone_1"].is_in(finacle["Phone_2"]) |
-                       basis["Phone_1"].is_in(finacle["Phone_3"]) |
-                       basis["Phone_2"].is_in(finacle["Phone_1"]) |
-                       basis["Phone_2"].is_in(finacle["Phone_2"]) |
-                       basis["Phone_2"].is_in(finacle["Phone_3"]) |
-                       basis["Phone_3"].is_in(finacle["Phone_1"]) |
-                       basis["Phone_3"].is_in(finacle["Phone_2"]) |
-                       basis["Phone_3"].is_in(finacle["Phone_3"]))
+        # Compare Phones: any overlap
+        phone_match = (
+            basis["Phone_1"].is_in(finacle["Phone_1"]) |
+            basis["Phone_1"].is_in(finacle["Phone_2"]) |
+            basis["Phone_1"].is_in(finacle["Phone_3"]) |
+            basis["Phone_2"].is_in(finacle["Phone_1"]) |
+            basis["Phone_2"].is_in(finacle["Phone_2"]) |
+            basis["Phone_2"].is_in(finacle["Phone_3"]) |
+            basis["Phone_3"].is_in(finacle["Phone_1"]) |
+            basis["Phone_3"].is_in(finacle["Phone_2"]) |
+            basis["Phone_3"].is_in(finacle["Phone_3"])
+        )
 
         comparison = comparison.with_columns(Phone_match=phone_match)
 
-        # Filter mismatches
+        # Identify mismatches
         mismatch_mask = ~(
             comparison["Name_match"] &
             comparison["Email_match"] &
@@ -89,16 +103,20 @@ if basis_file and finacle_file:
         )
 
         mismatches = pl.DataFrame({
-            "Name_Basis": basis["Name"],
-            "Name_Finacle": finacle["Name"],
-            "Email_Basis": basis["Email"],
-            "Email_Finacle": finacle["Email"],
-            "DOB_Basis": basis["Date of Birth"],
-            "DOB_Finacle": finacle["Date of Birth"],
-            "Phone_Basis": (basis["Phone_1"] + ", " + basis["Phone_2"] + ", " + basis["Phone_3"]),
-            "Phone_Finacle": (finacle["Phone_1"] + ", " + finacle["Phone_2"] + ", " + finacle["Phone_3"])
+            "BRA_CODE": raw_basis["BRA_CODE"],
+            "Account_Number": raw_basis["Account_Number"],
+            "ORIGKEY": raw_finacle["ORIGKEY"],
+            "Name_Basis": raw_basis["Name"],
+            "Name_Finacle": raw_finacle["Name"],
+            "Email_Basis": raw_basis["Email"],
+            "Email_Finacle": raw_finacle["Email"],
+            "DOB_Basis": raw_basis["Date of Birth"],
+            "DOB_Finacle": raw_finacle["Date of Birth"],
+            "Phone_Basis": raw_basis["Phone_1"] + ", " + raw_basis["Phone_2"] + ", " + raw_basis["Phone_3"],
+            "Phone_Finacle": raw_finacle["Phone_1"] + ", " + raw_finacle["Phone_2"] + ", " + raw_finacle["Phone_3"]
         }).filter(mismatch_mask)
 
+        # Display results
         st.subheader("🔍 Mismatched Records")
         if mismatches.height > 0:
             df_out = mismatches.to_pandas()
