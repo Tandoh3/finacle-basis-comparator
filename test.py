@@ -3,10 +3,10 @@ import polars as pl
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Finacle vs Basis Comparison Tool", layout="wide")
-st.title("📊 Finacle vs Basis Comparator (Large Dataset Support)")
+st.set_page_config(page_title="Finacle vs Basis Mismatch Comparator", layout="wide")
+st.title("📊 Finacle vs Basis Comparator (Mismatch Finder)")
 
-# === 1. Preprocessing Functions ===
+# --- Preprocessing Functions ---
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
@@ -35,7 +35,6 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
     ])
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
-    # Lowercase and strip string columns
     for col in df.columns:
         if df[col].dtype == pl.Utf8:
             df = df.with_columns(
@@ -43,19 +42,17 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
             )
     return df
 
-# === 2. Upload Section ===
-
+# --- File Upload ---
 col1, col2 = st.columns(2)
 with col1:
     basis_file = st.file_uploader("📥 Upload BASIS File (CSV/XLSX)", type=["csv", "xlsx"], key="basis")
 with col2:
     finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV/XLSX)", type=["csv", "xlsx"], key="finacle")
 
-# === 3. Processing Logic ===
-
+# --- Main Logic ---
 if basis_file and finacle_file:
     try:
-        # Read large files using Polars
+        # Load data
         basis_df = pl.read_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.read_csv(basis_file)
         finacle_df = pl.read_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.read_csv(finacle_file)
 
@@ -63,58 +60,53 @@ if basis_file and finacle_file:
         st.write(f"🔹 BASIS Rows: {basis_df.height}")
         st.write(f"🔹 FINACLE Rows: {finacle_df.height}")
 
-        # Preprocess and normalize
+        # Preprocess & normalize
         basis = normalize(preprocess_basis(basis_df))
         finacle = normalize(preprocess_finacle(finacle_df))
 
-        # Ensure phone columns are strings and fill nulls
-        for df in [basis, finacle]:
-            df = df.with_columns([
-                pl.col("Phone_1").fill_null("").cast(pl.Utf8),
-                pl.col("Phone_2").fill_null("").cast(pl.Utf8),
-                pl.col("Phone_3").fill_null("").cast(pl.Utf8),
-            ])
-
-        # Use with_columns above returns new df, so reassign:
+        # Fill nulls & cast phones as strings
         basis = basis.with_columns([
             pl.col("Phone_1").fill_null("").cast(pl.Utf8),
             pl.col("Phone_2").fill_null("").cast(pl.Utf8),
             pl.col("Phone_3").fill_null("").cast(pl.Utf8),
         ])
-
         finacle = finacle.with_columns([
             pl.col("Phone_1").fill_null("").cast(pl.Utf8),
             pl.col("Phone_2").fill_null("").cast(pl.Utf8),
             pl.col("Phone_3").fill_null("").cast(pl.Utf8),
         ])
 
-        # Align by index (truncate to shortest)
+        # Align by index to the shortest dataset
         min_len = min(basis.height, finacle.height)
         basis = basis.head(min_len)
         finacle = finacle.head(min_len)
 
-        # Compare fields
+        # Compare columns
         name_match = basis["Name"] == finacle["Name"]
         email_match = basis["Email"] == finacle["Email"]
         dob_match = basis["Date of Birth"] == finacle["Date of Birth"]
 
-        # Phone match logic (any-to-any) with to_list() on Finacle phone columns
-        phone_match = (
-            basis["Phone_1"].is_in(finacle["Phone_1"].to_list()) |
-            basis["Phone_1"].is_in(finacle["Phone_2"].to_list()) |
-            basis["Phone_1"].is_in(finacle["Phone_3"].to_list()) |
-            basis["Phone_2"].is_in(finacle["Phone_1"].to_list()) |
-            basis["Phone_2"].is_in(finacle["Phone_2"].to_list()) |
-            basis["Phone_2"].is_in(finacle["Phone_3"].to_list()) |
-            basis["Phone_3"].is_in(finacle["Phone_1"].to_list()) |
-            basis["Phone_3"].is_in(finacle["Phone_2"].to_list()) |
-            basis["Phone_3"].is_in(finacle["Phone_3"].to_list())
-        )
+        # Phone match: check if any phone in basis row is in any phone in finacle row
+        def phones_match(row_basis, row_finacle):
+            basis_phones = {row_basis["Phone_1"], row_basis["Phone_2"], row_basis["Phone_3"]}
+            finacle_phones = {row_finacle["Phone_1"], row_finacle["Phone_2"], row_finacle["Phone_3"]}
+            # Remove empty strings
+            basis_phones.discard("")
+            finacle_phones.discard("")
+            return len(basis_phones.intersection(finacle_phones)) > 0
 
-        # Mismatch mask: any field not matching means mismatch
+        # Compute phone matches row-wise
+        phone_matches = []
+        for i in range(min_len):
+            pb = basis[i]
+            pf = finacle[i]
+            phone_matches.append(phones_match(pb, pf))
+        phone_match = pl.Series(phone_matches)
+
+        # Mismatch mask if any field differs
         mismatch_mask = ~(name_match & email_match & dob_match & phone_match)
 
-        # Output mismatches
+        # Build mismatch DataFrame
         mismatches = pl.DataFrame({
             "BRA_CODE": basis["BRA_CODE"],
             "ACCOUNT_NUMBER": basis["CUS_NUM"],
@@ -133,12 +125,11 @@ if basis_file and finacle_file:
 
         if mismatches.height > 0:
             df_out = mismatches.to_pandas()
-            st.dataframe(df_out.head(1000), use_container_width=True)  # Show first 1000
+            st.dataframe(df_out.head(1000), use_container_width=True)
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 df_out.to_excel(writer, index=False, sheet_name="Mismatches")
-
             st.download_button(
                 label="📥 Download Mismatches (Excel)",
                 data=output.getvalue(),
