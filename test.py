@@ -3,216 +3,151 @@ import pandas as pd
 import numpy as np
 from rapidfuzz import fuzz, process
 from io import BytesIO
-import re
-from datetime import datetime
-from collections import defaultdict  # ✅ Added missing import
+from collections import defaultdict
 
-st.set_page_config(page_title="Finacle vs Basis Fuzzy Matching", layout="wide")
-st.title("🔍 Finacle vs Basis Fuzzy Matching")
+# 1) UI setup
+st.set_page_config(page_title="Streamed Finacle vs Basis Matching", layout="wide")
+st.title("🔍 Streamed Finacle vs Basis Fuzzy Matching")
 
-st.markdown(
-    "Upload your BASIS and FINACLE files below (CSV or Excel). "
-    "Matching will be done using fuzzy logic for names, emails, dates of birth, and phone numbers."
-)
+st.markdown("""
+Upload your BASIS (large) and FINACLE (reference) files.
+We’ll read BASIS in **chunks** and match each chunk immediately, streaming results.
+""")
 
-# === 1. Upload Section ===
-col1, col2 = st.columns(2)
-with col1:
-    basis_file = st.file_uploader("📂 Upload BASIS file (CSV or Excel)", type=["csv", "xlsx", "xls"], key="basis")
-with col2:
-    finacle_file = st.file_uploader("📂 Upload FINACLE file (CSV or Excel)", type=["csv", "xlsx", "xls"], key="finacle")
+basis_file = st.file_uploader("📂 BASIS (CSV only)", type=["csv"])
+finacle_file = st.file_uploader("📂 FINACLE (CSV or Excel)", type=["csv","xlsx","xls"])
 
-# === 2. Helper Functions ===
-
-def read_file(file, is_basis=True):
-    if file.name.endswith('.csv'):
-        df = pd.read_csv(file, dtype='str', keep_default_na=False)
+# 2) Helper functions (same as before)
+def read_finacle(file):
+    # read FINACLE all at once
+    if file.name.endswith(".csv"):
+        df = pd.read_csv(file, dtype=str, keep_default_na=False)
     else:
-        df = pd.read_excel(file, dtype='str', keep_default_na=False)
-    
-    phone_cols = ['TEL_NUM', 'TEL_NUM_2', 'FAX_NUM'] if is_basis else ['PREFERREDPHONE', 'SMSBANKINGMOBILENUMBER']
-    for col in phone_cols:
-        if col in df.columns:
-            df[col] = df[col].str.replace(r'\D+', '', regex=True)
+        df = pd.read_excel(file, dtype=str, keep_default_na=False)
+    df = df.fillna("")
+    # clean phones
+    for c in ["PREFERREDPHONE","SMSBANKINGMOBILENUMBER"]:
+        if c in df:
+            df[c] = df[c].str.replace(r"\D+","",regex=True)
+    # rename
+    df = df.rename(columns={
+        "NAME":"Name",
+        "PREFERREDEMAIL":"Email_Finacle",
+        "CUST_DOB":"DOB_Finacle",
+        "PREFERREDPHONE":"Phone_1_Finacle",
+        "SMSBANKINGMOBILENUMBER":"Phone_2_Finacle"
+    })
+    df["Phone_3_Finacle"] = ""
+    df = df[["Name","Email_Finacle","DOB_Finacle",
+             "Phone_1_Finacle","Phone_2_Finacle","Phone_3_Finacle"]]
+    df = df.applymap(lambda x: str(x).strip().lower())
     return df
 
-def preprocess_basis(df):
-    return df.rename(columns={
-        "CUS_SHO_NAME": "Name",
-        "EMAIL": "Email_Basis",
-        "BIR_DATE": "DOB_Basis",
-        "TEL_NUM": "Phone_1_Basis",
-        "TEL_NUM_2": "Phone_2_Basis",
-        "FAX_NUM": "Phone_3_Basis"
-    })[['Name', 'Email_Basis', 'DOB_Basis', 'Phone_1_Basis', 'Phone_2_Basis', 'Phone_3_Basis']].fillna('')
-
-def preprocess_finacle(df):
+def preprocess_basis_chunk(df):
+    df = df.fillna("")
+    # clean phones
+    for c in ["TEL_NUM","TEL_NUM_2","FAX_NUM"]:
+        if c in df:
+            df[c] = df[c].str.replace(r"\D+","",regex=True)
     df = df.rename(columns={
-        "NAME": "Name",
-        "PREFERREDEMAIL": "Email_Finacle",
-        "CUST_DOB": "DOB_Finacle",
-        "PREFERREDPHONE": "Phone_1_Finacle",
-        "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
+        "CUS_SHO_NAME":"Name",
+        "EMAIL":"Email_Basis",
+        "BIR_DATE":"DOB_Basis",
+        "TEL_NUM":"Phone_1_Basis",
+        "TEL_NUM_2":"Phone_2_Basis",
+        "FAX_NUM":"Phone_3_Basis"
     })
-    df['Phone_3_Finacle'] = ''
-    return df[['Name', 'Email_Finacle', 'DOB_Finacle', 'Phone_1_Finacle', 'Phone_2_Finacle', 'Phone_3_Finacle']].fillna('')
+    df = df[["Name","Email_Basis","DOB_Basis",
+             "Phone_1_Basis","Phone_2_Basis","Phone_3_Basis"]]
+    return df.applymap(lambda x: str(x).strip().lower())
 
-def normalize_text(s):
-    return str(s).strip().lower()
-
-def create_phone_index(df):
-    phone_map = defaultdict(list)
-    for idx, row in df.iterrows():
-        for phone in [row['Phone_1_Finacle'], row['Phone_2_Finacle'], row['Phone_3_Finacle']]:
-            if phone and len(phone) >= 6:
-                phone_map[phone].append(idx)
-    return phone_map
-
-def date_similarity(d1, d2, threshold_days=30):
+def score_pair(b, f):
+    name_score = fuzz.token_sort_ratio(b.Name, f.Name)
+    email_score = fuzz.ratio(b.Email_Basis, f.Email_Finacle)
+    # date similarity 30-day tolerance
     try:
-        date1 = pd.to_datetime(d1, errors='coerce')
-        date2 = pd.to_datetime(d2, errors='coerce')
-        if pd.isnull(date1) or pd.isnull(date2):
-            return 0
-        diff = abs((date1 - date2).days)
-        return max(0, 100 - (diff / threshold_days * 100))
+        d1 = pd.to_datetime(b.DOB_Basis, errors="coerce")
+        d2 = pd.to_datetime(f.DOB_Finacle, errors="coerce")
+        diff = abs((d1-d2).days) if pd.notna(d1) and pd.notna(d2) else 999
     except:
-        return 0
+        diff = 999
+    dob_score = max(0, 100 - diff/30*100) if diff<999 else 0
+    # phone overlap
+    setb = {p for p in (b.Phone_1_Basis,b.Phone_2_Basis,b.Phone_3_Basis) if p}
+    setf = {p for p in (f.Phone_1_Finacle,f.Phone_2_Finacle,f.Phone_3_Finacle) if p}
+    if setb or setf:
+        phone_score = len(setb&setf)/len(setb|setf)*100
+    else:
+        phone_score = 0
+    return name_score*0.4 + email_score*0.3 + dob_score*0.2 + phone_score*0.1
 
-def match_records(basis_df, finacle_df):
-    basis_df = basis_df.applymap(normalize_text)
-    finacle_df = finacle_df.applymap(normalize_text)
-
-    phone_index = create_phone_index(finacle_df)
-    finacle_df['block_key'] = finacle_df['Name'].str[:3] + finacle_df['DOB_Finacle'].str[:4]
-    block_index = finacle_df.groupby('block_key').groups
-
-    matches = []
-    matched_indices = set()
-    finacle_names = finacle_df['Name'].tolist()
-
-    for basis_idx, basis_row in basis_df.iterrows():
-        block_key = basis_row['Name'][:3] + basis_row['DOB_Basis'][:4]
-        candidates = set()
-        if block_key in block_index:
-            candidates.update(block_index[block_key])
-
-        for phone in [basis_row['Phone_1_Basis'], basis_row['Phone_2_Basis'], basis_row['Phone_3_Basis']]:
-            if phone and len(phone) >= 6:
-                candidates.update(phone_index.get(phone, []))
-
-        if not candidates:
-            name_matches = process.extractOne(
-                basis_row['Name'], 
-                finacle_names, 
-                scorer=fuzz.token_sort_ratio,
-                score_cutoff=70
-            )
-            if name_matches:
-                candidates.add(finacle_names.index(name_matches[0]))
-
-        best_score = 0
-        best_match = None
-        best_index = None
-
-        for finacle_idx in candidates:
-            if finacle_idx in matched_indices:
-                continue
-
-            finacle_row = finacle_df.iloc[finacle_idx]
-            name_score = fuzz.token_sort_ratio(basis_row['Name'], finacle_row['Name'])
-            email_score = fuzz.ratio(basis_row['Email_Basis'], finacle_row['Email_Finacle'])
-            dob_score = date_similarity(basis_row['DOB_Basis'], finacle_row['DOB_Finacle'])
-
-            basis_phones = {p for p in [basis_row['Phone_1_Basis'], basis_row['Phone_2_Basis'], basis_row['Phone_3_Basis']] if p}
-            finacle_phones = {p for p in [finacle_row['Phone_1_Finacle'], finacle_row['Phone_2_Finacle'], finacle_row['Phone_3_Finacle']] if p}
-            phone_score = 100 * len(basis_phones & finacle_phones) / len(basis_phones | finacle_phones) if basis_phones or finacle_phones else 0
-
-            total_score = (name_score * 0.4 + email_score * 0.3 + dob_score * 0.2 + phone_score * 0.1)
-
-            if total_score > best_score:
-                best_score = total_score
-                best_match = finacle_row
-                best_index = finacle_idx
-
-        if best_score >= 70 and best_match is not None:
-            matched_indices.add(best_index)
-            matches.append({
-                'Basis_Name': basis_row['Name'],
-                'Finacle_Name': best_match['Name'],
-                'Email_Basis': basis_row['Email_Basis'],
-                'Email_Finacle': best_match['Email_Finacle'],
-                'DOB_Basis': basis_row['DOB_Basis'],
-                'DOB_Finacle': best_match['DOB_Finacle'],
-                'Phone_Basis': ', '.join(p for p in [basis_row['Phone_1_Basis'], basis_row['Phone_2_Basis'], basis_row['Phone_3_Basis']] if p),
-                'Phone_Finacle': ', '.join(p for p in [best_match['Phone_1_Finacle'], best_match['Phone_2_Finacle'], best_match['Phone_3_Finacle']] if p),
-                'Match_Score': round(best_score, 2)
-            })
-
-    all_finacle_indices = set(finacle_df.index)
-    unmatched_finacle = all_finacle_indices - matched_indices
-
-    mismatches = []
-    matched_basis_names = {m['Basis_Name'] for m in matches}
-    for idx, row in basis_df.iterrows():
-        if row['Name'] not in matched_basis_names:
-            mismatches.append({
-                'Type': 'Basis',
-                'Name': row['Name'],
-                'Email': row['Email_Basis'],
-                'DOB': row['DOB_Basis'],
-                'Phones': ', '.join(p for p in [row['Phone_1_Basis'], row['Phone_2_Basis'], row['Phone_3_Basis']] if p)
-            })
-
-    for idx in unmatched_finacle:
-        row = finacle_df.loc[idx]
-        mismatches.append({
-            'Type': 'Finacle',
-            'Name': row['Name'],
-            'Email': row['Email_Finacle'],
-            'DOB': row['DOB_Finacle'],
-            'Phones': ', '.join(p for p in [row['Phone_1_Finacle'], row['Phone_2_Finacle'], row['Phone_3_Finacle']] if p)
-        })
-
-    return pd.DataFrame(matches), pd.DataFrame(mismatches)
-
-def convert_df(df):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False)
-    return output.getvalue()
-
-# === 3. Main Logic ===
+# 3) Kick off when both files are present
 if basis_file and finacle_file:
-    with st.spinner("🔄 Processing files and matching records..."):
-        basis_df = preprocess_basis(read_file(basis_file, is_basis=True))
-        finacle_df = preprocess_finacle(read_file(finacle_file, is_basis=False))
-        matches_df, mismatches_df = match_records(basis_df, finacle_df)
-
-    st.success(f"✅ Matching complete! Found {len(matches_df)} matches and {len(mismatches_df)} mismatches")
+    fin_df = read_finacle(finacle_file)
+    # build simple block index on first 3 letters + year of dob
+    fin_df["block"] = fin_df.Name.str[:3] + fin_df.DOB_Finacle.str[:4]
+    block_map = fin_df.groupby("block").groups
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("✅ Matches")
-        st.dataframe(matches_df.head(1000))
-    with col2:
-        st.subheader("❌ Mismatches")
-        st.dataframe(mismatches_df.head(1000))
-
-    if not matches_df.empty:
-        st.download_button(
-            label="📥 Download Matches",
-            data=convert_df(matches_df),
-            file_name="matches.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    if not mismatches_df.empty:
-        st.download_button(
-            label="📥 Download Mismatches",
-            data=convert_df(mismatches_df),
-            file_name="mismatches.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-else:
-    st.info("ℹ️ Please upload both BASIS and FINACLE files to begin.")
+    matched = []
+    mismatched = []
+    matched_fin_idxs = set()
+    
+    # placeholders
+    progress = st.progress(0)
+    table_holder = st.empty()
+    
+    # 4) Stream BASIS chunks
+    chunk_iter = pd.read_csv(basis_file, dtype=str, keep_default_na=False, chunksize=500)
+    total = 0
+    for i, chunk in enumerate(chunk_iter):
+        chunk = preprocess_basis_chunk(chunk)
+        total += len(chunk)
+        # for each row in chunk
+        for idx, row in chunk.iterrows():
+            blk = row.Name[:3] + row.DOB_Basis[:4]
+            cands = block_map.get(blk, [])
+            # phone overlap block
+            for p in (row.Phone_1_Basis,row.Phone_2_Basis,row.Phone_3_Basis):
+                cands += block_map.get(p, [])
+            best_score, best_idx = 0, None
+            for fidx in set(cands):
+                if fidx in matched_fin_idxs: continue
+                score = score_pair(row, fin_df.loc[fidx])
+                if score>best_score:
+                    best_score, best_idx = score, fidx
+            if best_score>=70 and best_idx is not None:
+                matched_fin_idxs.add(best_idx)
+                frow = fin_df.loc[best_idx]
+                matched.append({
+                    "Basis_Name": row.Name, "Finacle_Name": frow.Name,
+                    "Score":round(best_score,2)
+                })
+            else:
+                mismatched.append({
+                    "Type":"Basis","Name":row.Name,
+                    "Score":round(best_score,2)
+                })
+        progress.progress((i+1)/len(chunk_iter))
+        # show partial
+        table_holder.dataframe(pd.DataFrame(matched).tail(10))
+    # after all chunks
+    unmatched_fin = set(fin_df.index) - matched_fin_idxs
+    # add finacle‐side mismatches
+    for fidx in unmatched_fin:
+        frow = fin_df.loc[fidx]
+        mismatched.append({"Type":"Finacle","Name":frow.Name,"Score":0})
+    
+    st.success(f"Done! {len(matched)} matches, {len(mismatched)} mismatches")
+    st.subheader("Matches")
+    st.dataframe(pd.DataFrame(matched))
+    st.subheader("Mismatches")
+    st.dataframe(pd.DataFrame(mismatched))
+    
+    # download
+    def to_xlsx(df):
+        buf = BytesIO()
+        df.to_excel(buf,index=False)
+        buf.seek(0)
+        return buf
+    st.download_button("⬇ Download Matches", to_xlsx(pd.DataFrame(matched)), "matches.xlsx")
+    st.download_button("⬇ Download Mismatches", to_xlsx(pd.DataFrame(mismatched)), "mismatches.xlsx")
