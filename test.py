@@ -5,14 +5,24 @@ from fuzzywuzzy import fuzz
 from io import BytesIO
 
 st.set_page_config(page_title="Finacle vs Basis Fuzzy Matching", layout="wide")
-st.title("🔎 Finacle vs Basis Fuzzy Matching")
+st.title("🔍 Finacle vs Basis Fuzzy Matching")
 
-# === 1. Upload Files ===
-st.sidebar.header("Upload Data Files")
-basis_file = st.sidebar.file_uploader("Upload BASIS Excel file", type=["xlsx", "xls"])
-finacle_file = st.sidebar.file_uploader("Upload FINACLE Excel file", type=["xlsx", "xls"])
+st.markdown("Upload your BASIS and FINACLE files below (CSV or Excel). Matching will be done using fuzzy logic for names, emails, dates of birth, and phone numbers.")
+
+# === 1. Upload Section ===
+col1, col2 = st.columns(2)
+with col1:
+    basis_file = st.file_uploader("📂 Upload BASIS file (CSV or Excel)", type=["csv", "xlsx", "xls"], key="basis")
+with col2:
+    finacle_file = st.file_uploader("📂 Upload FINACLE file (CSV or Excel)", type=["csv", "xlsx", "xls"], key="finacle")
 
 # === 2. Helper Functions ===
+
+def read_file(file):
+    if file.name.endswith('.csv'):
+        return pl.read_csv(file)
+    else:
+        return pl.read_excel(file)
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
@@ -153,24 +163,24 @@ def convert_df(df):
         df.to_excel(writer, index=False)
     return output.getvalue()
 
-# === 3. Run Matching ===
+# === 3. Main Logic ===
 if basis_file and finacle_file:
-    with st.spinner("Processing and matching..."):
-        basis_pl = pl.read_excel(basis_file)
-        finacle_pl = pl.read_excel(finacle_file)
-        matches_df, mismatches_df = find_fuzzy_matches(basis_pl, finacle_pl)
+    with st.spinner("🔄 Matching records, please wait..."):
+        basis_df = read_file(basis_file)
+        finacle_df = read_file(finacle_file)
+        matches_df, mismatches_df = find_fuzzy_matches(basis_df, finacle_df)
 
-    st.success("✅ Matching Completed")
+    st.success("✅ Matching completed!")
 
     st.subheader("🎯 Matches")
     st.dataframe(matches_df)
 
-    st.download_button("⬇ Download Matches as Excel", data=convert_df(matches_df), file_name="matches.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("⬇ Download Matches", convert_df(matches_df), file_name="matches.xlsx")
 
     st.subheader("❌ Mismatches")
     st.dataframe(mismatches_df)
 
-    st.download_button("⬇ Download Mismatches as Excel", data=convert_df(mismatches_df), file_name="mismatches.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("⬇ Download Mismatches", convert_df(mismatches_df), file_name="mismatches.xlsx")
 
 else:
-    st.info("📤 Upload both BASIS and FINACLE Excel files to begin fuzzy matching.")
+    st.info("⬆ Please upload both BASIS and FINACLE files to start matching.")
