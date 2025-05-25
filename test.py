@@ -4,145 +4,137 @@ from rapidfuzz import fuzz
 from io import BytesIO
 
 st.set_page_config(page_title="Finacle vs Basis Fuzzy Matching", layout="wide")
-st.title("🔍 Finacle vs Basis Fuzzy Matching")
+st.title("🔍 Finacle vs Basis Fuzzy Matching Tool")
 
-st.markdown("""
-Upload your **BASIS** and **FINACLE** files below (CSV or Excel).  
-We’ll compare them row-by-row using fuzzy logic on Name, Email, DOB, and Phones.
-""")
+st.markdown("Upload your **BASIS** and **FINACLE** files to begin comparison.")
 
-# ── File upload ────────────────────────────────────────────────────────────────
+# File Uploads
 col1, col2 = st.columns(2)
 with col1:
-    basis_upload = st.file_uploader("📂 BASIS file", type=["csv","xlsx","xls"], key="basis")
+    basis_file = st.file_uploader("📂 Upload BASIS File", type=["csv", "xlsx", "xls"])
 with col2:
-    finacle_upload = st.file_uploader("📂 FINACLE file", type=["csv","xlsx","xls"], key="finacle")
+    finacle_file = st.file_uploader("📂 Upload FINACLE File", type=["csv", "xlsx", "xls"])
 
-# ── Cached readers ─────────────────────────────────────────────────────────────
 @st.cache_data
-def load_df(uploaded, is_basis: bool) -> pd.DataFrame:
-    if uploaded.name.lower().endswith(".csv"):
-        df = pd.read_csv(uploaded, dtype=str, keep_default_na=False)
+def load_file(file):
+    if file.name.endswith('.csv'):
+        df = pd.read_csv(file, dtype=str)
     else:
-        df = pd.read_excel(uploaded, dtype=str, keep_default_na=False)
-    df = df.fillna("")  # no NaNs
+        df = pd.read_excel(file, dtype=str)
+    return df.fillna('').applymap(str.strip)
 
-    # normalize text columns
-    for col in df.select_dtypes("object").columns:
-        df[col] = df[col].str.strip().str.lower()
-
-    return df
-
-# ── Preprocessing ────────────────────────────────────────────────────────────
-def prep_basis(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_basis(df):
     df = df.rename(columns={
         "cus_sho_name": "Name",
         "email": "Email_Basis",
         "bir_date": "DOB_Basis",
         "tel_num": "Phone_1_Basis",
         "tel_num_2": "Phone_2_Basis",
-        "fax_num": "Phone_3_Basis",
+        "fax_num": "Phone_3_Basis"
     })
-    # ensure all these exist
-    for c in ["Name","Email_Basis","DOB_Basis","Phone_1_Basis","Phone_2_Basis","Phone_3_Basis"]:
-        if c not in df.columns:
-            df[c] = ""
-    return df[["Name","Email_Basis","DOB_Basis","Phone_1_Basis","Phone_2_Basis","Phone_3_Basis"]]
+    for col in ["Name", "Email_Basis", "DOB_Basis", "Phone_1_Basis", "Phone_2_Basis", "Phone_3_Basis"]:
+        if col not in df.columns:
+            df[col] = ""
+    return df
 
-def prep_finacle(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_finacle(df):
     df = df.rename(columns={
         "name": "Name",
         "preferredemail": "Email_Finacle",
         "cust_dob": "DOB_Finacle",
         "preferredphone": "Phone_1_Finacle",
-        "smsbankingmobilenumber": "Phone_2_Finacle",
+        "smsbankingmobilenumber": "Phone_2_Finacle"
     })
-    # add missing columns
-    df["Phone_3_Finacle"] = df.get("Phone_3_Finacle","")
-    for c in ["Name","Email_Finacle","DOB_Finacle","Phone_1_Finacle","Phone_2_Finacle","Phone_3_Finacle"]:
-        if c not in df.columns:
-            df[c] = ""
-    return df[["Name","Email_Finacle","DOB_Finacle","Phone_1_Finacle","Phone_2_Finacle","Phone_3_Finacle"]]
+    for col in ["Name", "Email_Finacle", "DOB_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"]:
+        if col not in df.columns:
+            df[col] = ""
+    return df
 
-# ── Fuzzy compare row-by-row ──────────────────────────────────────────────────
-def compare_dfs(basis: pd.DataFrame, fin: pd.DataFrame, threshold: float=70):
-    n = min(len(basis), len(fin))
-    matches, mismatches = [], []
+def fuzzy_compare(basis_df, finacle_df, threshold=70):
+    matches = []
+    mismatches = []
+    n = min(len(basis_df), len(finacle_df))
+
     for i in range(n):
-        b = basis.iloc[i]
-        f = fin.iloc[i]
-        # scores
-        name_s = fuzz.token_sort_ratio(b.Name, f.Name)
-        email_s = fuzz.ratio(b.Email_Basis, f.Email_Finacle)
-        # simplistic DOB proximity (exact match = 100, else 0)
-        dob_s = 100 if b.DOB_Basis == f.DOB_Finacle and b.DOB_Basis else 0
-        # phone overlap
-        setb = {b.Phone_1_Basis, b.Phone_2_Basis, b.Phone_3_Basis} - {""}
-        setf = {f.Phone_1_Finacle, f.Phone_2_Finacle, f.Phone_3_Finacle} - {""}
-        phone_s = int(len(setb & setf) / (len(setb | setf) or 1) * 100)
+        b = basis_df.iloc[i]
+        f = finacle_df.iloc[i]
 
-        total = name_s*0.4 + email_s*0.3 + dob_s*0.2 + phone_s*0.1
+        score_name = fuzz.token_sort_ratio(b["Name"], f["Name"])
+        score_email = fuzz.ratio(b["Email_Basis"], f["Email_Finacle"])
+        score_dob = 100 if b["DOB_Basis"] == f["DOB_Finacle"] and b["DOB_Basis"] != "" else 0
 
-        rec = {
-            "Name_Basis": b.Name,
-            "Name_Finacle": f.Name,
-            "Email_Basis": b.Email_Basis,
-            "Email_Finacle": f.Email_Finacle,
-            "DOB_Basis": b.DOB_Basis,
-            "DOB_Finacle": f.DOB_Finacle,
-            "Phones_Basis": ", ".join(sorted(setb)),
-            "Phones_Finacle": ", ".join(sorted(setf)),
-            "Score": round(total,2)
+        phones_b = {b["Phone_1_Basis"], b["Phone_2_Basis"], b["Phone_3_Basis"]} - {""}
+        phones_f = {f["Phone_1_Finacle"], f["Phone_2_Finacle"], f["Phone_3_Finacle"]} - {""}
+        phone_overlap = len(phones_b & phones_f) / (len(phones_b | phones_f) or 1)
+        score_phone = int(phone_overlap * 100)
+
+        total_score = round(score_name * 0.4 + score_email * 0.3 + score_dob * 0.2 + score_phone * 0.1, 2)
+
+        record = {
+            "Name_Basis": b["Name"],
+            "Name_Finacle": f["Name"],
+            "Email_Basis": b["Email_Basis"],
+            "Email_Finacle": f["Email_Finacle"],
+            "DOB_Basis": b["DOB_Basis"],
+            "DOB_Finacle": f["DOB_Finacle"],
+            "Phones_Basis": ", ".join(phones_b),
+            "Phones_Finacle": ", ".join(phones_f),
+            "Score": total_score
         }
-        if total >= threshold:
-            matches.append(rec)
-        else:
-            mismatches.append(rec)
 
-    # any extra Basis rows?
-    for i in range(n, len(basis)):
-        b = basis.iloc[i]
-        mismatches.append({**{
-            "Name_Basis":b.Name, "Name_Finacle":"",
-            "Email_Basis":b.Email_Basis,"Email_Finacle":"",
-            "DOB_Basis":b.DOB_Basis,  "DOB_Finacle":"",
-            "Phones_Basis":", ".join(sorted({b.Phone_1_Basis,b.Phone_2_Basis,b.Phone_3_Basis}-{""})),
-            "Phones_Finacle":""}, "Score":0})
-    # any extra Finacle rows?
-    for i in range(n, len(fin)):
-        f = fin.iloc[i]
-        mismatches.append({**{
-            "Name_Basis":"", "Name_Finacle":f.Name,
-            "Email_Basis":"","Email_Finacle":f.Email_Finacle,
-            "DOB_Basis":"","DOB_Finacle":f.DOB_Finacle,
-            "Phones_Basis":"", "Phones_Finacle":", ".join(sorted({f.Phone_1_Finacle,f.Phone_2_Finacle,f.Phone_3_Finacle}-{""}))},
-            "Score":0})
+        if total_score >= threshold:
+            matches.append(record)
+        else:
+            mismatches.append(record)
+
+    # Extra rows
+    for i in range(n, len(basis_df)):
+        b = basis_df.iloc[i]
+        mismatches.append({
+            "Name_Basis": b["Name"], "Name_Finacle": "",
+            "Email_Basis": b["Email_Basis"], "Email_Finacle": "",
+            "DOB_Basis": b["DOB_Basis"], "DOB_Finacle": "",
+            "Phones_Basis": ", ".join({b["Phone_1_Basis"], b["Phone_2_Basis"], b["Phone_3_Basis"]} - {""}),
+            "Phones_Finacle": "", "Score": 0
+        })
+
+    for i in range(n, len(finacle_df)):
+        f = finacle_df.iloc[i]
+        mismatches.append({
+            "Name_Basis": "", "Name_Finacle": f["Name"],
+            "Email_Basis": "", "Email_Finacle": f["Email_Finacle"],
+            "DOB_Basis": "", "DOB_Finacle": f["DOB_Finacle"],
+            "Phones_Basis": "", "Phones_Finacle": ", ".join({f["Phone_1_Finacle"], f["Phone_2_Finacle"], f["Phone_3_Finacle"]} - {""}),
+            "Score": 0
+        })
 
     return pd.DataFrame(matches), pd.DataFrame(mismatches)
 
-# ── When both files are ready ────────────────────────────────────────────────
-if basis_upload and finacle_upload:
-    with st.spinner("🔄 Loading & comparing…"):
-        raw_basis = load_df(basis_upload, is_basis=True)
-        raw_fin    = load_df(finacle_upload, is_basis=False)
-        basis = prep_basis(raw_basis)
-        fin    = prep_finacle(raw_fin)
-        matches, mismatches = compare_dfs(basis, fin)
+def download_button(df, filename, label):
+    output = BytesIO()
+    df.to_excel(output, index=False)
+    st.download_button(label=label, data=output.getvalue(), file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    st.success(f"✅ Done: {len(matches)} matches, {len(mismatches)} mismatches")
-    c1, c2 = st.columns(2)
-    with c1:
+# Run comparison
+if basis_file and finacle_file:
+    with st.spinner("Processing..."):
+        df_basis = prepare_basis(load_file(basis_file))
+        df_finacle = prepare_finacle(load_file(finacle_file))
+        matches, mismatches = fuzzy_compare(df_basis, df_finacle)
+
+    st.success(f"✔ Found {len(matches)} matches and {len(mismatches)} mismatches")
+
+    col1, col2 = st.columns(2)
+    with col1:
         st.subheader("✅ Matches")
-        st.dataframe(matches)
+        st.dataframe(matches, use_container_width=True)
         if not matches.empty:
-            buf = BytesIO(); matches.to_excel(buf,index=False); buf.seek(0)
-            st.download_button("⬇ Download Matches", buf, "matches.xlsx")
-    with c2:
-        st.subheader("❌ Mismatches")
-        st.dataframe(mismatches)
-        if not mismatches.empty:
-            buf2 = BytesIO(); mismatches.to_excel(buf2,index=False); buf2.seek(0)
-            st.download_button("⬇ Download Mismatches", buf2, "mismatches.xlsx")
+            download_button(matches, "matches.xlsx", "📥 Download Matches")
 
+    with col2:
+        st.subheader("❌ Mismatches")
+        st.dataframe(mismatches, use_container_width=True)
+        if not mismatches.empty:
+            download_button(mismatches, "mismatches.xlsx", "📥 Download Mismatches")
 else:
-    st.info("⬆ Please upload both your BASIS and FINACLE files to begin.")
+    st.info("📌 Please upload both files to proceed.")
