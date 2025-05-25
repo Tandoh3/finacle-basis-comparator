@@ -37,7 +37,12 @@ def preprocess_basis_pd(df: pd.DataFrame) -> pd.DataFrame:
         "FAX_NUM": "Phone_3_Basis",
         "MOB_NUM": "Phone_4_Basis"
     })
-    return df[["Name", "Email_Basis", "Date_of_Birth_Basis", "Phone_1_Basis", "Phone_2_Basis", "Phone_3_Basis", "Phone_4_Basis"]].fillna('')
+    # Ensure all expected columns exist, fill with empty string if not
+    expected_cols = ["Name", "Email_Basis", "Date_of_Birth_Basis", "Phone_1_Basis", "Phone_2_Basis", "Phone_3_Basis", "Phone_4_Basis"]
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = ""
+    return df[expected_cols].fillna('')
 
 def preprocess_finacle_pd(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns={
@@ -47,8 +52,13 @@ def preprocess_finacle_pd(df: pd.DataFrame) -> pd.DataFrame:
         "PREFERREDPHONE": "Phone_1_Finacle",
         "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
     })
-    df['Phone_3_Finacle'] = ''
-    return df[["Name", "Email_Finacle", "Date_of_Birth_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"]].fillna('')
+    # Ensure all expected columns exist, fill with empty string if not
+    expected_cols = ["Name", "Email_Finacle", "Date_of_Birth_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"]
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = ""
+    df['Phone_3_Finacle'] = df.get('Phone_3_Finacle', '') # Ensure Phone_3_Finacle exists
+    return df[expected_cols].fillna('')
 
 def normalize_pd(series: pd.Series) -> pd.Series:
     return series.str.strip().str.lower()
@@ -91,7 +101,7 @@ def fuzzy_match_dates_pd(d1_str: str, d2_str: str, threshold_days: int) -> bool:
     except:
         return False
 
-def fuzzy_score_dates_pd(d1_str: str, d2_str: str) -> float:
+def fuzzy_score_dates_pd(d1_str: str, d2_str: str, threshold_days: int) -> float:
     try:
         date1 = pd.to_datetime(d1_str, errors='coerce')
         date2 = pd.to_datetime(d2_str, errors='coerce')
@@ -114,7 +124,7 @@ def find_fuzzy_matches_pd(basis_df: pd.DataFrame, finacle_df: pd.DataFrame, name
         best_match = None
         best_score = 0
         best_idx_f = None
-        phones_b = [row_b['Phone_1_Basis'], row_b['Phone_2_Basis'], row_b['Phone_3_Basis'], row_b['Phone_4_Basis']]
+        phones_b = [row_b['Phone_1_Basis'], row_b['Phone_2_Basis'], row_b['Phone_3_Basis'], row_b.get('Phone_4_Basis', '')]
         row_b_norm = basis_df_norm.loc[idx_b]
 
         for idx_f, row_f in finacle_df.iterrows():
@@ -131,7 +141,7 @@ def find_fuzzy_matches_pd(basis_df: pd.DataFrame, finacle_df: pd.DataFrame, name
             name_score = fuzzy_score_string_pd(row_b_norm['Name'], row_f_norm['Name'])
             email_score = fuzzy_score_string_pd(row_b_norm['Email_Basis'], row_f_norm['Email_Finacle'])
             phone_score = fuzzy_score_phones_pd(phones_b, phones_f)
-            dob_score = fuzzy_score_dates_pd(row_b['Date_of_Birth_Basis'], row_f['Date_of_Birth_Finacle'])
+            dob_score = fuzzy_score_dates_pd(row_b['Date_of_Birth_Basis'], row_f['Date_of_Birth_Finacle'], dob_threshold_days)
 
             total_score = (name_score * 0.4) + (email_score * 0.3) + (dob_score * 0.2) + (phone_score * 0.1) if name_match else 0
 
@@ -172,7 +182,13 @@ if basis_file and finacle_file:
         start_time = time.time()
         basis_df = read_file_pd(basis_file)
         finacle_df = read_file_pd(finacle_file)
-        matches_df, mismatches_basis_df, mismatches_finacle_df = find_fuzzy_matches_pd(basis_df, finacle_df)
+
+        basis_df_processed = preprocess_basis_pd(basis_df.copy())
+        finacle_df_processed = preprocess_finacle_pd(finacle_df.copy())
+
+        matches_df, mismatches_basis_df, mismatches_finacle_df = find_fuzzy_matches_pd(
+            basis_df_processed, finacle_df_processed
+        )
         end_time = time.time()
         st.write(f"Processing time: {end_time - start_time:.2f} seconds")
 
