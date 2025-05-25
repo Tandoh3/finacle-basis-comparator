@@ -20,7 +20,12 @@ def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
         "FAX_NUM": "Phone_3_Basis"
     })
     return df.select([
-        "Name", "Email_Basis", "Date_of_Birth_Basis", "Phone_1_Basis", "Phone_2_Basis", "Phone_3_Basis"
+        pl.col("Name").fill_null(""),
+        pl.col("Email_Basis").fill_null(""),
+        "Date_of_Birth_Basis",
+        pl.col("Phone_1_Basis").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_2_Basis").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_3_Basis").fill_null("").cast(pl.Utf8)
     ])
 
 def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
@@ -30,14 +35,14 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         "CUST_DOB": "Date_of_Birth_Finacle",
         "PREFERREDPHONE": "Phone_1_Finacle",
         "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
-    })
-    df = df.with_columns(pl.lit("").alias("Phone_3_Finacle"))
-    return df.with_columns([
-        pl.col("Phone_1_Finacle").cast(pl.Utf8),
-        pl.col("Phone_2_Finacle").cast(pl.Utf8),
-        pl.col("Phone_3_Finacle").cast(pl.Utf8)
-    ]).select([
-        "Name", "Email_Finacle", "Date_of_Birth_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"
+    }).with_columns(pl.lit("").alias("Phone_3_Finacle"))
+    return df.select([
+        pl.col("Name").fill_null(""),
+        pl.col("Email_Finacle").fill_null(""),
+        "Date_of_Birth_Finacle",
+        pl.col("Phone_1_Finacle").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_2_Finacle").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_3_Finacle").fill_null("")
     ])
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
@@ -94,8 +99,18 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_th
     basis_normalized = normalize(basis_df).to_pandas()
     finacle_normalized = normalize(finacle_df).to_pandas()
 
-    basis_with_phones = basis_normalized.apply(lambda row: {'Name': row['Name'], 'Email_Basis': row['Email_Basis'], 'Date_of_Birth_Basis': row['Date_of_Birth_Basis'], 'Phones_Basis': [p for p in [row['Phone_1_Basis'], row['Phone_2_Basis'], row['Phone_3_Basis']] if p]}, axis=1).tolist()
-    finacle_with_phones = finacle_normalized.apply(lambda row: {'Name': row['Name'], 'Email_Finacle': row['Email_Finacle'], 'Date_of_Birth_Finacle': row['Date_of_Birth_Finacle'], 'Phones_Finacle': [p for p in [row['Phone_1_Finacle'], row['Phone_2_Finacle'], row['Phone_3_Finacle']] if p]}, axis=1).tolist()
+    basis_with_phones = basis_normalized.apply(lambda row: {
+        'Name': str(row.get('Name', '')),
+        'Email_Basis': str(row.get('Email_Basis', '')),
+        'Date_of_Birth_Basis': row.get('Date_of_Birth_Basis'),
+        'Phones_Basis': [str(p) for p in [row.get('Phone_1_Basis', ''), row.get('Phone_2_Basis', ''), row.get('Phone_3_Basis', '')] if p]
+    }, axis=1).tolist()
+    finacle_with_phones = finacle_normalized.apply(lambda row: {
+        'Name': str(row.get('Name', '')),
+        'Email_Finacle': str(row.get('Email_Finacle', '')),
+        'Date_of_Birth_Finacle': row.get('Date_of_Birth_Finacle'),
+        'Phones_Finacle': [str(p) for p in [row.get('Phone_1_Finacle', ''), row.get('Phone_2_Finacle', ''), row.get('Phone_3_Finacle', '')] if p]
+    }, axis=1).tolist()
 
     matches = []
     mismatches = []
@@ -110,10 +125,10 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_th
             if i in matched_indices_finacle:
                 continue
 
-            name_match, name_score = fuzzy_match_string(basis_record['Name'], finacle_record['Name'], name_threshold)
-            email_match, email_score = fuzzy_match_string(basis_record.get('Email_Basis'), finacle_record.get('Email_Finacle'), email_threshold)
+            name_match, name_score = fuzzy_match_string(basis_record.get('Name', ''), finacle_record.get('Name', ''), name_threshold)
+            email_match, email_score = fuzzy_match_string(basis_record.get('Email_Basis', ''), finacle_record.get('Email_Finacle', ''), email_threshold)
             dob_match, dob_score = fuzzy_match_dates(basis_record.get('Date_of_Birth_Basis'), finacle_record.get('Date_of_Birth_Finacle'), dob_threshold_days)
-            phone_match, phone_score = fuzzy_match_phones(basis_record.get('Phones_Basis'), finacle_record.get('Phones_Finacle'), phone_threshold)
+            phone_match, phone_score = fuzzy_match_phones(basis_record.get('Phones_Basis', []), finacle_record.get('Phones_Finacle', []), phone_threshold)
 
             combined_score = (name_score * 0.4) + (email_score * 0.3) + (dob_score * 0.2) + (phone_score * 0.1) if name_match else 0
 
@@ -124,8 +139,8 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_th
 
         if best_match:
             matches.append({
-                "Basis_Name": basis_record['Name'],
-                "Finacle_Name": best_match['Name'],
+                "Basis_Name": basis_record.get('Name'),
+                "Finacle_Name": best_match.get('Name'),
                 "Email_Basis": basis_record.get('Email_Basis'),
                 "Email_Finacle": best_match.get('Email_Finacle'),
                 "DOB_Basis": basis_record.get('Date_of_Birth_Basis'),
@@ -137,7 +152,7 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_th
             matched_indices_finacle.add(best_index_finacle)
         else:
             mismatches.append({
-                "Basis_Name": basis_record['Name'],
+                "Basis_Name": basis_record.get('Name'),
                 "Email_Basis": basis_record.get('Email_Basis'),
                 "DOB_Basis": basis_record.get('Date_of_Birth_Basis'),
                 "Phones_Basis": basis_record.get('Phones_Basis')
@@ -146,7 +161,7 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_th
     for i, finacle_record in enumerate(finacle_with_phones):
         if i not in matched_indices_finacle:
             mismatches.append({
-                "Finacle_Name": finacle_record['Name'],
+                "Finacle_Name": finacle_record.get('Name'),
                 "Email_Finacle": finacle_record.get('Email_Finacle'),
                 "DOB_Finacle": finacle_record.get('Date_of_Birth_Finacle'),
                 "Phones_Finacle": finacle_record.get('Phones_Finacle')
@@ -164,7 +179,12 @@ def preprocess_basis_lazy(ldf: pl.LazyFrame) -> pl.LazyFrame:
         "TEL_NUM_2": "Phone_2_Basis",
         "FAX_NUM": "Phone_3_Basis"
     }).select([
-        "Name", "Email_Basis", "Date_of_Birth_Basis", "Phone_1_Basis", "Phone_2_Basis", "Phone_3_Basis"
+        pl.col("Name").fill_null(""),
+        pl.col("Email_Basis").fill_null(""),
+        "Date_of_Birth_Basis",
+        pl.col("Phone_1_Basis").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_2_Basis").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_3_Basis").fill_null("").cast(pl.Utf8)
     ])
 
 def preprocess_finacle_lazy(ldf: pl.LazyFrame) -> pl.LazyFrame:
@@ -175,12 +195,13 @@ def preprocess_finacle_lazy(ldf: pl.LazyFrame) -> pl.LazyFrame:
         "PREFERREDPHONE": "Phone_1_Finacle",
         "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
     }).with_columns(pl.lit("").alias("Phone_3_Finacle"))
-    return ldf.with_columns([
-        pl.col("Phone_1_Finacle").cast(pl.Utf8),
-        pl.col("Phone_2_Finacle").cast(pl.Utf8),
-        pl.col("Phone_3_Finacle").cast(pl.Utf8)
-    ]).select([
-        "Name", "Email_Finacle", "Date_of_Birth_Finacle", "Phone_1_Finacle", "Phone_2_Finacle", "Phone_3_Finacle"
+    return ldf.select([
+        pl.col("Name").fill_null(""),
+        pl.col("Email_Finacle").fill_null(""),
+        "Date_of_Birth_Finacle",
+        pl.col("Phone_1_Finacle").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_2_Finacle").fill_null("").cast(pl.Utf8),
+        pl.col("Phone_3_Finacle").fill_null("")
     ])
 
 def normalize_lazy(ldf: pl.LazyFrame) -> pl.LazyFrame:
