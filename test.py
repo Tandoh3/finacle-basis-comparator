@@ -21,11 +21,34 @@ with col2:
 
 # === 2. Helper Functions ===
 
-def read_file(file):
+def read_file(file, is_basis=True):
+    # Detect CSV or Excel
     if file.name.endswith('.csv'):
-        return pl.read_csv(file)
+        # For CSV, specify dtype for phone columns as string using 'dtypes' arg
+        if is_basis:
+            return pl.read_csv(file, dtypes={
+                "TEL_NUM": pl.Utf8,
+                "TEL_NUM_2": pl.Utf8,
+                "FAX_NUM": pl.Utf8
+            })
+        else:
+            return pl.read_csv(file, dtypes={
+                "PREFERREDPHONE": pl.Utf8,
+                "SMSBANKINGMOBILENUMBER": pl.Utf8
+            })
     else:
-        return pl.read_excel(file)
+        # For Excel, use schema_overrides to force phone columns as string
+        if is_basis:
+            return pl.read_excel(file, schema_overrides={
+                "TEL_NUM": pl.Utf8,
+                "TEL_NUM_2": pl.Utf8,
+                "FAX_NUM": pl.Utf8
+            })
+        else:
+            return pl.read_excel(file, schema_overrides={
+                "PREFERREDPHONE": pl.Utf8,
+                "SMSBANKINGMOBILENUMBER": pl.Utf8
+            })
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
@@ -77,8 +100,8 @@ def fuzzy_match_string(s1, s2, threshold=80):
     return score >= threshold, score
 
 def fuzzy_match_phones(list1, list2, threshold=85):
-    set1 = set([x for x in list1 if x])
-    set2 = set([x for x in list2 if x])
+    set1 = set([p for p in list1 if p])
+    set2 = set([p for p in list2 if p])
     intersection = set1 & set2
     union = set1 | set2
     if not union:
@@ -97,11 +120,7 @@ def fuzzy_match_dates(d1, d2, threshold_days=30):
     except:
         return False, 0
 
-def find_fuzzy_matches(
-    basis_df: pl.DataFrame, finacle_df: pl.DataFrame,
-    name_threshold=85, email_threshold=90,
-    phone_threshold=85, dob_threshold_days=30
-):
+def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_threshold=85, email_threshold=90, phone_threshold=85, dob_threshold_days=30):
     basis_df = normalize(preprocess_basis(basis_df)).to_pandas()
     finacle_df = normalize(preprocess_finacle(finacle_df)).to_pandas()
 
@@ -125,7 +144,7 @@ def find_fuzzy_matches(
             phone_match, phone_score = fuzzy_match_phones(b_phones, f_phones, phone_threshold)
             dob_match, dob_score = fuzzy_match_dates(b_row["Date_of_Birth_Basis"], f_row["Date_of_Birth_Finacle"], dob_threshold_days)
 
-            total_score = (name_score * 0.4 + email_score * 0.3 + dob_score * 0.2 + phone_score * 0.1) if name_match else 0
+            total_score = name_score * 0.4 + email_score * 0.3 + dob_score * 0.2 + phone_score * 0.1 if name_match else 0
 
             if total_score > best_score and name_match:
                 best_score = total_score
@@ -140,8 +159,8 @@ def find_fuzzy_matches(
                 "Email_Finacle": best_match["Email_Finacle"],
                 "DOB_Basis": b_row["Date_of_Birth_Basis"],
                 "DOB_Finacle": best_match["Date_of_Birth_Finacle"],
-                "Phones_Basis": ", ".join(filter(None, b_phones)),
-                "Phones_Finacle": ", ".join(filter(None, [best_match["Phone_1_Finacle"], best_match["Phone_2_Finacle"], best_match["Phone_3_Finacle"]])),
+                "Phones_Basis": b_phones,
+                "Phones_Finacle": [best_match["Phone_1_Finacle"], best_match["Phone_2_Finacle"], best_match["Phone_3_Finacle"]],
                 "Score": round(best_score, 2)
             })
             matched_indices.add(best_idx)
@@ -150,7 +169,7 @@ def find_fuzzy_matches(
                 "Unmatched_Basis_Name": b_row["Name"],
                 "Email_Basis": b_row["Email_Basis"],
                 "DOB_Basis": b_row["Date_of_Birth_Basis"],
-                "Phones_Basis": ", ".join(filter(None, b_phones))
+                "Phones_Basis": b_phones
             })
 
     for k, f_row in finacle_df.iterrows():
@@ -159,7 +178,7 @@ def find_fuzzy_matches(
                 "Unmatched_Finacle_Name": f_row["Name"],
                 "Email_Finacle": f_row["Email_Finacle"],
                 "DOB_Finacle": f_row["Date_of_Birth_Finacle"],
-                "Phones_Finacle": ", ".join(filter(None, [f_row["Phone_1_Finacle"], f_row["Phone_2_Finacle"], f_row["Phone_3_Finacle"]]))
+                "Phones_Finacle": [f_row["Phone_1_Finacle"], f_row["Phone_2_Finacle"], f_row["Phone_3_Finacle"]]
             })
 
     return pd.DataFrame(matches), pd.DataFrame(mismatches)
@@ -173,31 +192,33 @@ def convert_df(df):
 # === 3. Main Logic ===
 if basis_file and finacle_file:
     with st.spinner("🔄 Matching records, please wait..."):
-        basis_df = read_file(basis_file)
-        finacle_df = read_file(finacle_file)
+        basis_df = read_file(basis_file, is_basis=True)
+        finacle_df = read_file(finacle_file, is_basis=False)
         matches_df, mismatches_df = find_fuzzy_matches(basis_df, finacle_df)
 
-    st.success("✅ Matching completed!")
+    st.success("✅ Matching complete!")
 
-    st.subheader("🎯 Matches")
+    st.subheader("✅ Matches")
     st.dataframe(matches_df)
-
-    st.download_button(
-        "⬇ Download Matches",
-        convert_df(matches_df),
-        file_name="matches.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
 
     st.subheader("❌ Mismatches")
     st.dataframe(mismatches_df)
 
-    st.download_button(
-        "⬇ Download Mismatches",
-        convert_df(mismatches_df),
-        file_name="mismatches.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
+    if not matches_df.empty:
+        excel_data = convert_df(matches_df)
+        st.download_button(
+            label="📥 Download Matches as Excel",
+            data=excel_data,
+            file_name="matches.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    if not mismatches_df.empty:
+        excel_data = convert_df(mismatches_df)
+        st.download_button(
+            label="📥 Download Mismatches as Excel",
+            data=excel_data,
+            file_name="mismatches.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 else:
-    st.info("⬆ Please upload both BASIS and FINACLE files to start matching.")
+    st.info("Please upload both BASIS and FINACLE files to start matching.")
