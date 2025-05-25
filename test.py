@@ -21,13 +21,15 @@ with col2:
 
 # === File Reading ===
 def read_file(file, is_basis=True):
+    schema = {"TEL_NUM": pl.Utf8, "TEL_NUM_2": pl.Utf8, "FAX_NUM": pl.Utf8} if is_basis else {
+        "PREFERREDPHONE": pl.Utf8, "SMSBANKINGMOBILENUMBER": pl.Utf8
+    }
     if file.name.endswith('.csv'):
-        return pl.read_csv(file, dtypes={"TEL_NUM": pl.Utf8, "TEL_NUM_2": pl.Utf8, "FAX_NUM": pl.Utf8} if is_basis else {
-            "PREFERREDPHONE": pl.Utf8, "SMSBANKINGMOBILENUMBER": pl.Utf8})
+        return pl.read_csv(file, dtypes=schema)
     else:
-        return pl.read_excel(file, schema_overrides={"TEL_NUM": pl.Utf8, "TEL_NUM_2": pl.Utf8, "FAX_NUM": pl.Utf8} if is_basis else {
-            "PREFERREDPHONE": pl.Utf8, "SMSBANKINGMOBILENUMBER": pl.Utf8})
+        return pl.read_excel(file, schema_overrides=schema)
 
+# === Preprocessing ===
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
         "CUS_SHO_NAME": "Name",
@@ -69,6 +71,7 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
             df = df.with_columns(pl.col(col).str.strip_chars().str.to_lowercase().alias(col))
     return df
 
+# === Fuzzy Matching Functions ===
 def fuzzy_match_string(s1, s2, threshold=85):
     if not s1 or not s2:
         return False, 0
@@ -76,13 +79,13 @@ def fuzzy_match_string(s1, s2, threshold=85):
     return score >= threshold, score
 
 def fuzzy_match_phones(list1, list2, threshold=85):
-    set1 = set([p for p in list1 if p])
-    set2 = set([p for p in list2 if p])
+    set1 = set(filter(None, list1))
+    set2 = set(filter(None, list2))
     if not set1 and not set2:
         return True, 100
     intersection = set1 & set2
     union = set1 | set2
-    score = (len(intersection) / len(union)) * 100
+    score = (len(intersection) / len(union)) * 100 if union else 0
     return score >= threshold, score
 
 def fuzzy_match_dates(d1, d2, threshold_days=30):
@@ -96,7 +99,7 @@ def fuzzy_match_dates(d1, d2, threshold_days=30):
     except:
         return False, 0
 
-# === Optimized Matching ===
+# === Core Matching Logic ===
 def find_fuzzy_matches(basis_df, finacle_df):
     basis_df = normalize(preprocess_basis(basis_df)).to_pandas()
     finacle_df = normalize(preprocess_finacle(finacle_df)).to_pandas()
@@ -121,6 +124,7 @@ def find_fuzzy_matches(basis_df, finacle_df):
         for j, f_row in finacle_df.iterrows():
             if j in matched_indices:
                 continue
+
             f_name = f_row["Name"]
             f_email = f_row["Email_Finacle"]
             f_dob = f_row["Date_of_Birth_Finacle"]
@@ -176,14 +180,14 @@ def find_fuzzy_matches(basis_df, finacle_df):
 
     return pd.DataFrame(matches), pd.DataFrame(mismatches)
 
-# === Download Helper ===
+# === Excel Export ===
 def convert_df(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False)
     return output.getvalue()
 
-# === Run Matching ===
+# === Trigger Matching ===
 if basis_file and finacle_file:
     with st.spinner("🔄 Matching records, please wait..."):
         basis_df = read_file(basis_file, is_basis=True)
