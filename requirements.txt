@@ -7,3 +7,4 @@ duckdb
 thefuzz[speedup]
 fuzzywuzzy[speedup]
 xlsxwriter
+rapidfuzz[speedup]
