@@ -179,7 +179,7 @@ def convert_df(df):
 
 # === Trigger Matching ===
 if basis_file and finacle_file:
-    batch_size = st.slider("Batch Size for Processing", min_value=1000, max_value=10000, value=5000, step=1000)
+    batch_size = st.slider("Batch Size for Processing", min_value=500, max_value=10000, value=5000, step=500)
     with st.spinner("🔄 Matching records in batches, please wait..."):
         basis_df = read_file(basis_file, is_basis=True)
         finacle_df = read_file(finacle_file, is_basis=False)
