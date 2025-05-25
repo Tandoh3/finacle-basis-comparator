@@ -26,17 +26,28 @@ with col2:
 def read_file(file, is_basis=True):
     if file.name.endswith('.csv'):
         if is_basis:
-            return pl.read_csv(file, dtypes={"TEL_NUM": str, "TEL_NUM_2": str, "FAX_NUM": str})
+            return pl.read_csv(file, schema_overrides={
+                "TEL_NUM": pl.String,
+                "TEL_NUM_2": pl.String,
+                "FAX_NUM": pl.String
+            })
         else:
-            return pl.read_csv(file, dtypes={"PREFERREDPHONE": str, "SMSBANKINGMOBILENUMBER": str})
+            return pl.read_csv(file, schema_overrides={
+                "PREFERREDPHONE": pl.String,
+                "SMSBANKINGMOBILENUMBER": pl.String
+            })
     else:
         if is_basis:
-            return pl.read_excel(file, schema_overrides={"TEL_NUM": str, "TEL_NUM_2": str, "FAX_NUM": str})
+            return pl.read_excel(file, schema_overrides={
+                "TEL_NUM": pl.String,
+                "TEL_NUM_2": pl.String,
+                "FAX_NUM": pl.String
+            })
         else:
-            return pl.read_excel(file, schema_overrides={"PREFERREDPHONE": str, "SMSBANKINGMOBILENUMBER": str})
-
-def clean_phone(phone: str) -> str:
-    return re.sub(r'\D+', '', phone) if phone else ''
+            return pl.read_excel(file, schema_overrides={
+                "PREFERREDPHONE": pl.String,
+                "SMSBANKINGMOBILENUMBER": pl.String
+            })
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
@@ -51,9 +62,9 @@ def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
         pl.col("Name").fill_null(""),
         pl.col("Email_Basis").fill_null(""),
         pl.col("Date_of_Birth_Basis").fill_null(""),
-        pl.col("Phone_1_Basis").fill_null("").map_elements(clean_phone),
-        pl.col("Phone_2_Basis").fill_null("").map_elements(clean_phone),
-        pl.col("Phone_3_Basis").fill_null("").map_elements(clean_phone)
+        pl.col("Phone_1_Basis").fill_null("").str.replace_all(r"\D", ""),
+        pl.col("Phone_2_Basis").fill_null("").str.replace_all(r"\D", ""),
+        pl.col("Phone_3_Basis").fill_null("").str.replace_all(r"\D", "")
     ])
 
 def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
@@ -68,16 +79,17 @@ def preprocess_finacle(df: pl.DataFrame) -> pl.DataFrame:
         pl.col("Name").fill_null(""),
         pl.col("Email_Finacle").fill_null(""),
         pl.col("Date_of_Birth_Finacle").fill_null(""),
-        pl.col("Phone_1_Finacle").fill_null("").map_elements(clean_phone),
-        pl.col("Phone_2_Finacle").fill_null("").map_elements(clean_phone),
+        pl.col("Phone_1_Finacle").fill_null("").str.replace_all(r"\D", ""),
+        pl.col("Phone_2_Finacle").fill_null("").str.replace_all(r"\D", ""),
         pl.lit("").alias("Phone_3_Finacle")
     ])
 
 def normalize(df: pl.DataFrame) -> pl.DataFrame:
-    for col in df.columns:
-        if df[col].dtype == pl.Utf8:
-            df = df.with_columns(pl.col(col).str.strip().str.to_lowercase())
-    return df
+    return df.with_columns(
+        pl.all().exclude(["Date_of_Birth.*", "Phone_.*"])
+               .str.strip_chars()
+               .str.to_lowercase()
+    )
 
 def fuzzy_match_dates(d1, d2, threshold_days=30):
     try:
@@ -101,7 +113,7 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame,
     basis_df = basis_df.with_columns(index=pl.int_range(0, basis_df.height))
     finacle_df = finacle_df.with_columns(index=pl.int_range(0, finacle_df.height))
 
-    # Add blocking keys
+    # Add blocking keys (first 3 letters of name + birth year)
     basis_df = basis_df.with_columns(
         pl.col("Name").str.slice(0, 3).alias("block_key"),
         pl.col("Date_of_Birth_Basis").str.slice(0, 4).alias("dob_year")
@@ -147,7 +159,7 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame,
         for fin_idx in candidates:
             fin_row = finacle_df.row(fin_idx, named=True)
             
-            # Name similarity
+            # Name similarity (using rapidfuzz)
             name_score = fuzz.ratio(basis_row["Name"], fin_row["Name"])
             if name_score < name_threshold:
                 continue
@@ -156,8 +168,8 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame,
             email_score = fuzz.ratio(basis_row["Email_Basis"], fin_row["Email_Finacle"]) if basis_row["Email_Basis"] and fin_row["Email_Finacle"] else 0
 
             # Phone similarity
-            basis_phones = {basis_row["Phone_1_Basis"], basis_row["Phone_2_Basis"], basis_row["Phone_3_Basis"]}
-            fin_phones = {fin_row["Phone_1_Finacle"], fin_row["Phone_2_Finacle"], fin_row["Phone_3_Finacle"]}
+            basis_phones = {p for p in [basis_row["Phone_1_Basis"], basis_row["Phone_2_Basis"], basis_row["Phone_3_Basis"]] if p}
+            fin_phones = {p for p in [fin_row["Phone_1_Finacle"], fin_row["Phone_2_Finacle"], fin_row["Phone_3_Finacle"]] if p}
             common = len(basis_phones & fin_phones)
             total = len(basis_phones | fin_phones)
             phone_score = (common / total) * 100 if total else 100
@@ -181,13 +193,13 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame,
                     "Phones_Finacle": list(fin_phones)
                 }
 
-        if best_score >= 70:  # Example threshold
+        if best_score >= 70:  # Overall matching threshold
             matched_indices.add(best_fin_idx)
             matches.append({
                 "Basis_Name": basis_row["Name"],
                 "Email_Basis": basis_row["Email_Basis"],
                 "DOB_Basis": basis_row["Date_of_Birth_Basis"],
-                "Phones_Basis": list(basis_phones),
+                "Phones_Basis": list({p for p in [basis_row["Phone_1_Basis"], basis_row["Phone_2_Basis"], basis_row["Phone_3_Basis"]] if p}),
                 **best_data,
                 "Score": round(best_score, 2)
             })
@@ -196,7 +208,7 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame,
                 "Basis_Name": basis_row["Name"],
                 "Email_Basis": basis_row["Email_Basis"],
                 "DOB_Basis": basis_row["Date_of_Birth_Basis"],
-                "Phones_Basis": list(basis_phones)
+                "Phones_Basis": list({p for p in [basis_row["Phone_1_Basis"], basis_row["Phone_2_Basis"], basis_row["Phone_3_Basis"]] if p})
             })
 
     # Collect unmatched Finacle entries
@@ -206,7 +218,7 @@ def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame,
                 "Finacle_Name": fin_row["Name"],
                 "Email_Finacle": fin_row["Email_Finacle"],
                 "DOB_Finacle": fin_row["Date_of_Birth_Finacle"],
-                "Phones_Finacle": [fin_row["Phone_1_Finacle"], fin_row["Phone_2_Finacle"], fin_row["Phone_3_Finacle"]]
+                "Phones_Finacle": [p for p in [fin_row["Phone_1_Finacle"], fin_row["Phone_2_Finacle"], fin_row["Phone_3_Finacle"]] if p]
             })
 
     return pd.DataFrame(matches), pd.DataFrame(mismatches)
@@ -227,10 +239,10 @@ if basis_file and finacle_file:
     st.success("✅ Matching complete!")
 
     st.subheader("✅ Matches")
-    st.dataframe(matches_df)
+    st.dataframe(matches_df.head(1000))  # Show first 1000 matches
 
     st.subheader("❌ Mismatches")
-    st.dataframe(mismatches_df)
+    st.dataframe(mismatches_df.head(1000))  # Show first 1000 mismatches
 
     if not matches_df.empty:
         st.download_button(
