@@ -101,76 +101,81 @@ def fuzzy_match_dates(d1, d2, threshold_days=30):
     except:
         return False, 0
 
-def find_fuzzy_matches_batched(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, batch_size=1000, name_threshold=85, email_threshold=90, phone_threshold=85, dob_threshold_days=30):
-    basis_df = normalize(preprocess_basis(basis_df)).to_pandas()
-    finacle_df = normalize(preprocess_finacle(finacle_df)).to_pandas()
+def find_fuzzy_matches_double_batched(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, basis_batch_size=1000, finacle_batch_size=1000, name_threshold=85, email_threshold=90, phone_threshold=85, dob_threshold_days=30):
+    basis_df_pd = normalize(preprocess_basis(basis_df)).to_pandas()
+    finacle_df_pd = normalize(preprocess_finacle(finacle_df)).to_pandas()
 
     matches = []
-    mismatches_basis = []
+    unmatched_basis = []
     matched_finacle_indices = set()
 
-    num_basis_rows = len(basis_df)
-    for i in range(0, num_basis_rows, batch_size):
-        basis_batch = basis_df.iloc[i:i + batch_size]
-        st.info(f"Processing BASIS records {i + 1} to {min(i + batch_size, num_basis_rows)}")
+    num_basis_rows = len(basis_df_pd)
+    num_finacle_rows = len(finacle_df_pd)
 
-        for _, b_row in basis_batch.iterrows():
-            b_phones = [b_row.get("Phone_1_Basis", ""), b_row.get("Phone_2_Basis", ""), b_row.get("Phone_3_Basis", "")]
-            best_match = None
-            best_score = 0
-            best_idx = None
+    for i in range(0, num_basis_rows, basis_batch_size):
+        basis_batch = basis_df_pd.iloc[i:i + basis_batch_size]
+        best_potential_matches = {b_idx: (None, 0.0) for b_idx in basis_batch.index} # (finacle_row, score)
+        st.info(f"Processing BASIS batch {i // basis_batch_size + 1} of {num_basis_rows // basis_batch_size + (1 if num_basis_rows % basis_batch_size != 0 else 0)}")
 
-            for j, f_row in finacle_df.iterrows():
-                if j in matched_finacle_indices:
-                    continue
-                f_phones = [f_row.get("Phone_1_Finacle", ""), f_row.get("Phone_2_Finacle", ""), f_row.get("Phone_3_Finacle", "")]
+        for j in range(0, num_finacle_rows, finacle_batch_size):
+            finacle_batch = finacle_df_pd.iloc[j:j + finacle_batch_size]
+            st.info(f"  Comparing with FINACLE batch {j // finacle_batch_size + 1} of {num_finacle_rows // finacle_batch_size + (1 if num_finacle_rows % finacle_batch_size != 0 else 0)}")
 
-                name_match, name_score = fuzzy_match_string(b_row["Name"], f_row["Name"], name_threshold)
-                email_match, email_score = fuzzy_match_string(b_row["Email_Basis"], f_row["Email_Finacle"], email_threshold)
-                phone_match, phone_score = fuzzy_match_phones(b_phones, f_phones, phone_threshold)
-                dob_match, dob_score = fuzzy_match_dates(b_row["Date_of_Birth_Basis"], f_row["Date_of_Birth_Finacle"], dob_threshold_days)
+            for b_idx, b_row in basis_batch.iterrows():
+                b_phones = [b_row.get("Phone_1_Basis", ""), b_row.get("Phone_2_Basis", ""), b_row.get("Phone_3_Basis", "")]
+                current_best_match, current_best_score = best_potential_matches[b_idx]
 
-                total_score = name_score * 0.4 + email_score * 0.3 + dob_score * 0.2 + phone_score * 0.1 if name_match else 0
+                for f_idx, f_row in finacle_batch.iterrows():
+                    f_phones = [f_row.get("Phone_1_Finacle", ""), f_row.get("Phone_2_Finacle", ""), f_row.get("Phone_3_Finacle", "")]
 
-                if total_score > best_score and name_match:
-                    best_score = total_score
-                    best_match = f_row
-                    best_idx = j
+                    name_match, name_score = fuzzy_match_string(b_row["Name"], f_row["Name"], name_threshold)
+                    email_match, email_score = fuzzy_match_string(b_row["Email_Basis"], f_row["Email_Finacle"], email_threshold)
+                    phone_match, phone_score = fuzzy_match_phones(b_phones, f_phones, phone_threshold)
+                    dob_match, dob_score = fuzzy_match_dates(b_row["Date_of_Birth_Basis"], f_row["Date_of_Birth_Finacle"], dob_threshold_days)
 
-            if best_match is not None:
+                    total_score = name_score * 0.4 + email_score * 0.3 + dob_score * 0.2 + phone_score * 0.1 if name_match else 0
+
+                    if name_match and total_score > current_best_score:
+                        best_potential_matches[b_idx] = (f_row, total_score)
+
+        # After comparing with all FINACLE batches, finalize matches for the current BASIS batch
+        for b_idx, (best_f_row, best_score) in best_potential_matches.items():
+            if best_f_row is not None and best_score >= (name_threshold * 0.4): # Ensure at least name threshold is met for a match
                 matches.append({
-                    "Basis_Name": b_row["Name"],
-                    "Finacle_Name": best_match["Name"],
-                    "Email_Basis": b_row["Email_Basis"],
-                    "Email_Finacle": best_match["Email_Finacle"],
-                    "DOB_Basis": b_row["Date_of_Birth_Basis"],
-                    "DOB_Finacle": best_match["Date_of_Birth_Finacle"],
-                    "Phones_Basis": b_phones,
-                    "Phones_Finacle": [best_match["Phone_1_Finacle"], best_match["Phone_2_Finacle"], best_match["Phone_3_Finacle"]],
+                    "Basis_Name": basis_df_pd.loc[b_idx, "Name"],
+                    "Finacle_Name": best_f_row["Name"],
+                    "Email_Basis": basis_df_pd.loc[b_idx, "Email_Basis"],
+                    "Email_Finacle": best_f_row["Email_Finacle"],
+                    "DOB_Basis": basis_df_pd.loc[b_idx, "Date_of_Birth_Basis"],
+                    "DOB_Finacle": best_f_row["Date_of_Birth_Finacle"],
+                    "Phones_Basis": [basis_df_pd.loc[b_idx, f"Phone_{i}_Basis"] for i in range(1, 4)],
+                    "Phones_Finacle": [best_f_row[f"Phone_{i}_Finacle"] for i in range(1, 4)],
                     "Score": round(best_score, 2)
                 })
-                matched_finacle_indices.add(best_idx)
+                matched_finacle_indices.add(best_f_row.name)
             else:
-                mismatches_basis.append({
-                    "Unmatched_Basis_Name": b_row["Name"],
-                    "Email_Basis": b_row["Email_Basis"],
-                    "DOB_Basis": b_row["Date_of_Birth_Basis"],
-                    "Phones_Basis": b_phones
+                unmatched_basis.append({
+                    "Unmatched_Basis_Name": basis_df_pd.loc[b_idx, "Name"],
+                    "Email_Basis": basis_df_pd.loc[b_idx, "Email_Basis"],
+                    "DOB_Basis": basis_df_pd.loc[b_idx, "Date_of_Birth_Basis"],
+                    "Phones_Basis": [basis_df_pd.loc[b_idx, f"Phone_{i}_Basis"] for i in range(1, 4)]
                 })
-        st.progress((i + batch_size) / num_basis_rows)
+        st.progress((i + basis_batch_size) / num_basis_rows)
 
-    mismatches_finacle = []
-    finacle_df_reset = finacle_df.reset_index()
+    # Identify unmatched FINACLE records
+    unmatched_finacle_list = []
+    finacle_df_reset = finacle_df_pd.reset_index()
     for _, f_row in finacle_df_reset.iterrows():
         if f_row['index'] not in matched_finacle_indices:
-            mismatches_finacle.append({
+            unmatched_finacle_list.append({
                 "Unmatched_Finacle_Name": f_row["Name"],
                 "Email_Finacle": f_row["Email_Finacle"],
                 "DOB_Finacle": f_row["Date_of_Birth_Finacle"],
-                "Phones_Finacle": [f_row["Phone_1_Finacle"], f_row["Phone_2_Finacle"], f_row["Phone_3_Finacle"]]
+                "Phones_Finacle": [f_row[f"Phone_{i}_Finacle"] for i in range(1, 4)]
             })
+    unmatched_finacle_df = pd.DataFrame(unmatched_finacle_list)
 
-    return pd.DataFrame(matches), pd.DataFrame(mismatches_basis), pd.DataFrame(mismatches_finacle)
+    return pd.DataFrame(matches), pd.DataFrame(unmatched_basis), unmatched_finacle_df
 
 def convert_df(df):
     output = BytesIO()
@@ -180,11 +185,14 @@ def convert_df(df):
 
 # === 3. Main Logic ===
 if basis_file and finacle_file:
-    batch_size = st.slider("Batch Size for Processing", min_value=100, max_value=5000, value=1000, step=100)
-    with st.spinner(f"🔄 Matching records in batches of {batch_size}, please wait..."):
+    basis_batch_size = st.slider("BASIS Batch Size", min_value=100, max_value=5000, value=1000, step=100)
+    finacle_batch_size = st.slider("FINACLE Batch Size", min_value=100, max_value=5000, value=1000, step=100)
+    with st.spinner(f"🔄 Matching records in BASIS batches of {basis_batch_size} and FINACLE batches of {finacle_batch_size}, please wait..."):
         basis_df = read_file(basis_file, is_basis=True)
         finacle_df = read_file(finacle_file, is_basis=False)
-        matches_df, mismatches_basis_df, mismatches_finacle_df = find_fuzzy_matches_batched(basis_df, finacle_df, batch_size=batch_size)
+        matches_df, mismatches_basis_df, mismatches_finacle_df = find_fuzzy_matches_double_batched(
+            basis_df, finacle_df, basis_batch_size=basis_batch_size, finacle_batch_size=finacle_batch_size
+        )
 
     st.success("✅ Matching complete!")
 
