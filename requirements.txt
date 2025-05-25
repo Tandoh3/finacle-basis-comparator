@@ -6,3 +6,4 @@ dask
 duckdb
 thefuzz[speedup]
 fuzzywuzzy[speedup]
+xlsxwriter
