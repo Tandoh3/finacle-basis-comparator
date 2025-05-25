@@ -1,14 +1,18 @@
 import streamlit as st
 import polars as pl
 import pandas as pd
-import io
 from fuzzywuzzy import fuzz
-from fuzzywuzzy import process
+from io import BytesIO
 
 st.set_page_config(page_title="Finacle vs Basis Fuzzy Matching", layout="wide")
-st.title("🔎 Finacle vs Basis Fuzzy Matching (Large Data Handling)")
+st.title("🔎 Finacle vs Basis Fuzzy Matching")
 
-# === 1. Preprocessing Functions ===
+# === 1. Upload Files ===
+st.sidebar.header("Upload Data Files")
+basis_file = st.sidebar.file_uploader("Upload BASIS Excel file", type=["xlsx", "xls"])
+finacle_file = st.sidebar.file_uploader("Upload FINACLE Excel file", type=["xlsx", "xls"])
+
+# === 2. Helper Functions ===
 
 def preprocess_basis(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({
@@ -53,16 +57,6 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
             )
     return df
 
-def combine_phones(df: pl.DataFrame, prefix: str) -> pl.DataFrame:
-    df = df.with_columns([
-        pl.col(f"Phone_1_{prefix}").fill_null("").cast(pl.Utf8),
-        pl.col(f"Phone_2_{prefix}").fill_null("").cast(pl.Utf8),
-        pl.col(f"Phone_3_{prefix}").fill_null("").cast(pl.Utf8)
-    ]).with_columns(
-        pl.concat_list([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"]).alias(f"Phones_{prefix}")
-    ).drop([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"])
-    return df
-
 def fuzzy_match_string(s1, s2, threshold=80):
     if not s1 or not s2:
         return False, 0
@@ -70,12 +64,10 @@ def fuzzy_match_string(s1, s2, threshold=80):
     return score >= threshold, score
 
 def fuzzy_match_phones(list1, list2, threshold=85):
-    if not list1 or not list2:
-        return False, 0
     set1 = set(list1)
     set2 = set(list2)
-    intersection = set1.intersection(set2)
-    union = set1.union(set2)
+    intersection = set1 & set2
+    union = set1 | set2
     if not union:
         return True, 100
     score = (len(intersection) / len(union)) * 100
@@ -83,215 +75,102 @@ def fuzzy_match_phones(list1, list2, threshold=85):
 
 def fuzzy_match_dates(d1, d2, threshold_days=30):
     try:
-        if not d1 or not d2:
-            return False, 0
         date1 = pd.to_datetime(d1, errors='coerce')
         date2 = pd.to_datetime(d2, errors='coerce')
         if pd.isna(date1) or pd.isna(date2):
             return False, 0
         diff = abs((date1 - date2).days)
-        return diff <= threshold_days, 100 - (diff / threshold_days * 100) if threshold_days > 0 else 100
-    except Exception:
+        return diff <= threshold_days, 100 - (diff / threshold_days * 100)
+    except:
         return False, 0
 
-# === 2. Fuzzy Matching Function ===
 def find_fuzzy_matches(basis_df: pl.DataFrame, finacle_df: pl.DataFrame, name_threshold=85, email_threshold=90, phone_threshold=85, dob_threshold_days=30):
-    basis_normalized = normalize(basis_df).to_pandas()
-    finacle_normalized = normalize(finacle_df).to_pandas()
-
-    basis_with_phones = basis_normalized.apply(lambda row: {
-        'Name': str(row.get('Name', '')),
-        'Email_Basis': str(row.get('Email_Basis', '')),
-        'Date_of_Birth_Basis': row.get('Date_of_Birth_Basis'),
-        'Phones_Basis': [str(p) for p in [row.get('Phone_1_Basis', ''), row.get('Phone_2_Basis', ''), row.get('Phone_3_Basis', '')] if p]
-    }, axis=1).tolist()
-    finacle_with_phones = finacle_normalized.apply(lambda row: {
-        'Name': str(row.get('Name', '')),
-        'Email_Finacle': str(row.get('Email_Finacle', '')),
-        'Date_of_Birth_Finacle': row.get('Date_of_Birth_Finacle'),
-        'Phones_Finacle': [str(p) for p in [row.get('Phone_1_Finacle', ''), row.get('Phone_2_Finacle', ''), row.get('Phone_3_Finacle', '')] if p]
-    }, axis=1).tolist()
+    basis_df = normalize(preprocess_basis(basis_df)).to_pandas()
+    finacle_df = normalize(preprocess_finacle(finacle_df)).to_pandas()
 
     matches = []
     mismatches = []
-    matched_indices_finacle = set()
+    matched_indices = set()
 
-    for basis_record in basis_with_phones:
+    for i, b_row in basis_df.iterrows():
+        b_phones = [b_row.get("Phone_1_Basis", ""), b_row.get("Phone_2_Basis", ""), b_row.get("Phone_3_Basis", "")]
         best_match = None
         best_score = 0
-        best_index_finacle = -1
+        best_idx = None
 
-        for i, finacle_record in enumerate(finacle_with_phones):
-            if i in matched_indices_finacle:
+        for j, f_row in finacle_df.iterrows():
+            if j in matched_indices:
                 continue
+            f_phones = [f_row.get("Phone_1_Finacle", ""), f_row.get("Phone_2_Finacle", ""), f_row.get("Phone_3_Finacle", "")]
 
-            name_match, name_score = fuzzy_match_string(basis_record.get('Name', ''), finacle_record.get('Name', ''), name_threshold)
-            email_match, email_score = fuzzy_match_string(basis_record.get('Email_Basis', ''), finacle_record.get('Email_Finacle', ''), email_threshold)
-            dob_match, dob_score = fuzzy_match_dates(basis_record.get('Date_of_Birth_Basis'), finacle_record.get('Date_of_Birth_Finacle'), dob_threshold_days)
-            phone_match, phone_score = fuzzy_match_phones(basis_record.get('Phones_Basis', []), finacle_record.get('Phones_Finacle', []), phone_threshold)
+            name_match, name_score = fuzzy_match_string(b_row["Name"], f_row["Name"], name_threshold)
+            email_match, email_score = fuzzy_match_string(b_row["Email_Basis"], f_row["Email_Finacle"], email_threshold)
+            phone_match, phone_score = fuzzy_match_phones(b_phones, f_phones, phone_threshold)
+            dob_match, dob_score = fuzzy_match_dates(b_row["Date_of_Birth_Basis"], f_row["Date_of_Birth_Finacle"], dob_threshold_days)
 
-            combined_score = (name_score * 0.4) + (email_score * 0.3) + (dob_score * 0.2) + (phone_score * 0.1) if name_match else 0
+            total_score = name_score * 0.4 + email_score * 0.3 + dob_score * 0.2 + phone_score * 0.1 if name_match else 0
 
-            if combined_score > best_score and name_match:
-                best_score = combined_score
-                best_match = finacle_record
-                best_index_finacle = i
+            if total_score > best_score and name_match:
+                best_score = total_score
+                best_match = f_row
+                best_idx = j
 
-        if best_match:
+        if best_match is not None:
             matches.append({
-                "Basis_Name": basis_record.get('Name'),
-                "Finacle_Name": best_match.get('Name'),
-                "Email_Basis": basis_record.get('Email_Basis'),
-                "Email_Finacle": best_match.get('Email_Finacle'),
-                "DOB_Basis": basis_record.get('Date_of_Birth_Basis'),
-                "DOB_Finacle": best_match.get('Date_of_Birth_Finacle'),
-                "Phones_Basis": basis_record.get('Phones_Basis'),
-                "Phones_Finacle": best_match.get('Phones_Finacle'),
-                "Similarity_Score": best_score
+                "Basis_Name": b_row["Name"],
+                "Finacle_Name": best_match["Name"],
+                "Email_Basis": b_row["Email_Basis"],
+                "Email_Finacle": best_match["Email_Finacle"],
+                "DOB_Basis": b_row["Date_of_Birth_Basis"],
+                "DOB_Finacle": best_match["Date_of_Birth_Finacle"],
+                "Phones_Basis": b_phones,
+                "Phones_Finacle": [best_match["Phone_1_Finacle"], best_match["Phone_2_Finacle"], best_match["Phone_3_Finacle"]],
+                "Score": round(best_score, 2)
             })
-            matched_indices_finacle.add(best_index_finacle)
+            matched_indices.add(best_idx)
         else:
             mismatches.append({
-                "Basis_Name": basis_record.get('Name'),
-                "Email_Basis": basis_record.get('Email_Basis'),
-                "DOB_Basis": basis_record.get('Date_of_Birth_Basis'),
-                "Phones_Basis": basis_record.get('Phones_Basis')
+                "Unmatched_Basis_Name": b_row["Name"],
+                "Email_Basis": b_row["Email_Basis"],
+                "DOB_Basis": b_row["Date_of_Birth_Basis"],
+                "Phones_Basis": b_phones
             })
 
-    for i, finacle_record in enumerate(finacle_with_phones):
-        if i not in matched_indices_finacle:
+    for k, f_row in finacle_df.iterrows():
+        if k not in matched_indices:
             mismatches.append({
-                "Finacle_Name": finacle_record.get('Name'),
-                "Email_Finacle": finacle_record.get('Email_Finacle'),
-                "DOB_Finacle": finacle_record.get('Date_of_Birth_Finacle'),
-                "Phones_Finacle": finacle_record.get('Phones_Finacle')
+                "Unmatched_Finacle_Name": f_row["Name"],
+                "Email_Finacle": f_row["Email_Finacle"],
+                "DOB_Finacle": f_row["Date_of_Birth_Finacle"],
+                "Phones_Finacle": [f_row["Phone_1_Finacle"], f_row["Phone_2_Finacle"], f_row["Phone_3_Finacle"]]
             })
 
     return pd.DataFrame(matches), pd.DataFrame(mismatches)
 
-# === 3. Lazy Preprocessing Functions ===
-def preprocess_basis_lazy(ldf: pl.LazyFrame) -> pl.LazyFrame:
-    return ldf.rename({
-        "CUS_SHO_NAME": "Name",
-        "EMAIL": "Email_Basis",
-        "BIR_DATE": "Date_of_Birth_Basis",
-        "TEL_NUM": "Phone_1_Basis",
-        "TEL_NUM_2": "Phone_2_Basis",
-        "FAX_NUM": "Phone_3_Basis"
-    }).select([
-        pl.col("Name").fill_null(""),
-        pl.col("Email_Basis").fill_null(""),
-        "Date_of_Birth_Basis",
-        pl.col("Phone_1_Basis").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_2_Basis").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_3_Basis").fill_null("").cast(pl.Utf8)
-    ])
+def convert_df(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False)
+    return output.getvalue()
 
-def preprocess_finacle_lazy(ldf: pl.LazyFrame) -> pl.LazyFrame:
-    ldf = ldf.rename({
-        "NAME": "Name",
-        "PREFERREDEMAIL": "Email_Finacle",
-        "CUST_DOB": "Date_of_Birth_Finacle",
-        "PREFERREDPHONE": "Phone_1_Finacle",
-        "SMSBANKINGMOBILENUMBER": "Phone_2_Finacle"
-    }).with_columns(pl.lit("").alias("Phone_3_Finacle"))
-    return ldf.select([
-        pl.col("Name").fill_null(""),
-        pl.col("Email_Finacle").fill_null(""),
-        "Date_of_Birth_Finacle",
-        pl.col("Phone_1_Finacle").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_2_Finacle").fill_null("").cast(pl.Utf8),
-        pl.col("Phone_3_Finacle").fill_null("")
-    ])
-
-def normalize_lazy(ldf: pl.LazyFrame) -> pl.LazyFrame:
-    for col in ldf.columns:
-        if ldf.schema[col] == pl.Utf8:
-            ldf = ldf.with_columns(
-                pl.col(col).str.strip_chars().str.to_lowercase().alias(col)
-            )
-    return ldf
-
-def combine_phones_lazy(ldf: pl.LazyFrame, prefix: str) -> pl.LazyFrame:
-    ldf = ldf.with_columns([
-        pl.col(f"Phone_1_{prefix}").fill_null("").cast(pl.Utf8),
-        pl.col(f"Phone_2_{prefix}").fill_null("").cast(pl.Utf8),
-        pl.col(f"Phone_3_{prefix}").fill_null("").cast(pl.Utf8)
-    ]).with_columns(
-        pl.concat_list([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"]).alias(f"Phones_{prefix}")
-    ).drop([f"Phone_1_{prefix}", f"Phone_2_{prefix}", f"Phone_3_{prefix}"])
-    return ldf
-
-# === 4. Upload Section ===
-
-col1, col2 = st.columns(2)
-with col1:
-    basis_file = st.file_uploader("📥 Upload BASIS File (CSV/XLSX)", type=["csv", "xlsx"], key="basis")
-with col2:
-    finacle_file = st.file_uploader("📥 Upload FINACLE File (CSV/XLSX)", type=["csv", "xlsx"], key="finacle")
-
-# === 5. Processing Logic ===
-
+# === 3. Run Matching ===
 if basis_file and finacle_file:
-    try:
-        # Define a larger infer_schema_length
-        large_infer_schema_length = 2000
+    with st.spinner("Processing and matching..."):
+        basis_pl = pl.read_excel(basis_file)
+        finacle_pl = pl.read_excel(finacle_file)
+        matches_df, mismatches_df = find_fuzzy_matches(basis_pl, finacle_pl)
 
-        # Read files using Polars LazyFrames with increased infer_schema_length
-        if basis_file.name.endswith("xlsx"):
-            basis_ldf = pl.scan_excel(basis_file)
-        else:
-            basis_ldf = pl.scan_csv(basis_file, infer_schema_length=large_infer_schema_length)
+    st.success("✅ Matching Completed")
 
-        if finacle_file.name.endswith("xlsx"):
-            finacle_ldf = pl.scan_excel(finacle_file)
-        else:
-            finacle_ldf = pl.scan_csv(
-                finacle_file,
-                schema_overrides={"PREFERREDPHONE": pl.Utf8},
-                infer_schema_length=large_infer_schema_length
-            )
+    st.subheader("🎯 Matches")
+    st.dataframe(matches_df)
 
-        st.subheader("⏳ Processing Data (Lazy Loading)")
-        st.info(f"Data is being processed using lazy loading (infer_schema_length={large_infer_schema_length}). This might take some time for large datasets.")
+    st.download_button("⬇ Download Matches as Excel", data=convert_df(matches_df), file_name="matches.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        basis_processed_lazy = preprocess_basis_lazy(basis_ldf)
-        finacle_processed_lazy = preprocess_finacle_lazy(finacle_ldf)
-        basis_normalized_lazy = normalize_lazy(basis_processed_lazy)
-        finacle_normalized_lazy = normalize_lazy(finacle_processed_lazy)
-        basis_with_phones_lazy = combine_phones_lazy(basis_normalized_lazy, "Basis")
-        finacle_with_phones_lazy = combine_phones_lazy(finacle_normalized_lazy, "Finacle")
+    st.subheader("❌ Mismatches")
+    st.dataframe(mismatches_df)
 
-        st.subheader("⬇️ Collecting Data for Matching")
-        basis_df = basis_with_phones_lazy.collect()
-        finacle_df = finacle_with_phones_lazy.collect()
+    st.download_button("⬇ Download Mismatches as Excel", data=convert_df(mismatches_df), file_name="mismatches.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        st.subheader("✅ Performing Fuzzy Matching")
-        matches_df, mismatches_df = find_fuzzy_matches(basis_df, finacle_df)
-
-        st.subheader("✅ Fuzzy Matches (Potential Same Person)")
-        if not matches_df.empty:
-            st.dataframe(matches_df.head(100), use_container_width=True)
-            output_matches = io.BytesIO()
-            with pd.ExcelWriter(output_matches, engine="openpyxl") as writer:
-                matches_df.to_excel(writer, index=False, sheet_name="Fuzzy_Matches")
-            st.download_button(
-                label="📥 Download Fuzzy Matches (Excel)",
-                data=output_matches.getvalue(),
-                file_name="fuzzy_matches.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("No fuzzy matches found based on the defined thresholds.")
-
-        st.subheader("💔 Mismatches (No Significant Fuzzy Match)")
-        if not mismatches_df.empty:
-            st.dataframe(mismatches_df.head(100), use_container_width=True)
-            output_mismatches = io.BytesIO()
-            with pd.ExcelWriter(output_mismatches, engine="openpyxl") as writer:
-                mismatches_df.to_excel(writer, index=False, sheet_name="Mismatches")
-            st.download_button(
-                label="📥 Download Mismatches (Excel)",
-                data=output_mismatches.getvalue(),
-                file_name="fuzzy_mismatches.xlsx",
-                mime="application/vnd.openxmlformats-officed
+else:
+    st.info("📤 Upload both BASIS and FINACLE Excel files to begin fuzzy matching.")
