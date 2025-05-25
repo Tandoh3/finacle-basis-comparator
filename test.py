@@ -234,15 +234,26 @@ with col2:
 
 if basis_file and finacle_file:
     try:
-        # Read files using Polars LazyFrames
-        basis_ldf = pl.scan_excel(basis_file) if basis_file.name.endswith("xlsx") else pl.scan_csv(basis_file)
-        finacle_ldf = pl.scan_excel(finacle_file) if finacle_file.name.endswith("xlsx") else pl.scan_csv(
-            finacle_file,
-            schema_overrides={"PREFERREDPHONE": pl.Utf8}
-        )
+        # Define a larger infer_schema_length
+        large_infer_schema_length = 2000
+
+        # Read files using Polars LazyFrames with increased infer_schema_length
+        if basis_file.name.endswith("xlsx"):
+            basis_ldf = pl.scan_excel(basis_file)
+        else:
+            basis_ldf = pl.scan_csv(basis_file, infer_schema_length=large_infer_schema_length)
+
+        if finacle_file.name.endswith("xlsx"):
+            finacle_ldf = pl.scan_excel(finacle_file)
+        else:
+            finacle_ldf = pl.scan_csv(
+                finacle_file,
+                schema_overrides={"PREFERREDPHONE": pl.Utf8},
+                infer_schema_length=large_infer_schema_length
+            )
 
         st.subheader("⏳ Processing Data (Lazy Loading)")
-        st.info("Data is being processed using lazy loading. This might take some time for large datasets.")
+        st.info(f"Data is being processed using lazy loading (infer_schema_length={large_infer_schema_length}). This might take some time for large datasets.")
 
         basis_processed_lazy = preprocess_basis_lazy(basis_ldf)
         finacle_processed_lazy = preprocess_finacle_lazy(finacle_ldf)
@@ -283,10 +294,4 @@ if basis_file and finacle_file:
                 label="📥 Download Mismatches (Excel)",
                 data=output_mismatches.getvalue(),
                 file_name="fuzzy_mismatches.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("No significant mismatches found.")
-
-    except Exception as e:
-        st.error(f"❌ Error processing files: {e}")
+                mime="application/vnd.openxmlformats-officed
