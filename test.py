@@ -1,58 +1,87 @@
+# bio_mismatch_app.py
 import streamlit as st
 import pandas as pd
-from thefuzz import fuzz
-from thefuzz import process
+from rapidfuzz import fuzz
+import tempfile
 
-st.title("Customer BioData Comparison - BASIS vs FINACLE")
+st.title("Bio Data Mismatch Detector")
 
-def clean_data(df):
-    return df.drop_duplicates(subset=["Name", "DOB", "Email", "Phone1"])
+st.markdown("""
+Upload CSV files from **Finacle** and **Basis**, and the app will compare:
+- `name`
+- `dob`
+- `email`
+- All phone fields: `preferredphone`, `smsbankingnumber` vs `tel_num`, `tel_num_2`, `fax_num`, `mob_num`
+""")
 
-def fuzzy_match(df1, df2, threshold=90):
-    matched_rows = []
+# File upload
+finacle_file = st.file_uploader("Upload Finacle CSV", type="csv")
+basis_file = st.file_uploader("Upload Basis CSV", type="csv")
 
-    for i, row in df1.iterrows():
-        name1 = row["Name"]
-        matches = process.extractOne(name1, df2["Name"], scorer=fuzz.token_sort_ratio)
+# Matching function
+def normalize(s):
+    return str(s).lower().strip() if pd.notnull(s) else ""
 
-        if matches and matches[1] >= threshold:
-            matched_row = df2[df2["Name"] == matches[0]].iloc[0]
-            result = {
-                "Basis_Name": row["Name"],
-                "Finacle_Name": matched_row["Name"],
-                "Name_Score": matches[1],
-                "DOB_Match": row["DOB"] == matched_row["DOB"],
-                "Email_Match": row["Email"] == matched_row["Email"],
-                "Phone_Match": row["Phone1"] == matched_row["Phone1"]
-            }
-            matched_rows.append(result)
+def combine_phones(row, cols):
+    return " ".join(normalize(row[col]) for col in cols if col in row)
 
-    return pd.DataFrame(matched_rows)
+def compare_records(f_row, b_row):
+    name_score = fuzz.token_sort_ratio(normalize(f_row['name']), normalize(b_row['name']))
+    dob_score = fuzz.ratio(normalize(f_row['dob']), normalize(b_row['dob']))
+    email_score = fuzz.token_sort_ratio(normalize(f_row['email']), normalize(b_row['email']))
 
-uploaded_basis = st.file_uploader("Upload BASIS Excel File", type=["xlsx"])
-uploaded_finacle = st.file_uploader("Upload FINACLE Excel File", type=["xlsx"])
+    f_phone = combine_phones(f_row, ['preferredphone', 'smsbankingnumber'])
+    b_phone = combine_phones(b_row, ['tel_num', 'tel_num_2', 'fax_num', 'mob_num'])
+    phone_score = fuzz.partial_ratio(f_phone, b_phone)
 
-if uploaded_basis and uploaded_finacle:
-    basis_df = pd.read_excel(uploaded_basis)
-    finacle_df = pd.read_excel(uploaded_finacle)
+    avg_score = (name_score + dob_score + email_score + phone_score) / 4
+    return avg_score
 
-    st.subheader("Step 1: Clean & Deduplicate")
-    basis_clean = clean_data(basis_df)
-    finacle_clean = clean_data(finacle_df)
-    st.success(f"Deduplicated BASIS: {len(basis_clean)} rows, FINACLE: {len(finacle_clean)} rows")
+# Main logic
+if finacle_file and basis_file:
+    with st.spinner("Reading files..."):
+        finacle = pd.read_csv(finacle_file)
+        basis = pd.read_csv(basis_file)
 
-    st.subheader("Step 2: Fuzzy Matching...")
-    threshold = st.slider("Select name match threshold", 80, 100, 90)
-    matched_df = fuzzy_match(basis_clean, finacle_clean, threshold=threshold)
+    st.success("Files loaded successfully!")
 
-    st.write("🔍 Matching Results")
-    st.dataframe(matched_df)
+    st.markdown("### Start Matching")
 
-    st.download_button(
-        "Download Matched Report",
-        matched_df.to_csv(index=False),
-        file_name="matched_biodata_report.csv",
-        mime="text/csv"
-    )
-else:
-    st.info("Upload both BASIS and FINACLE files to begin.")
+    threshold = st.slider("Match Score Threshold", 0, 100, 85)
+
+    if st.button("Find Mismatches"):
+        mismatches = []
+
+        # Preprocess and block on DOB to reduce load
+        basis_grouped = basis.groupby(basis['dob'])
+
+        for _, f_row in finacle.iterrows():
+            f_dob = normalize(f_row['dob'])
+            candidate_pool = basis_grouped.get_group(f_dob) if f_dob in basis_grouped.groups else basis
+
+            best_score = 0
+            best_match = None
+
+            for _, b_row in candidate_pool.iterrows():
+                score = compare_records(f_row, b_row)
+                if score > best_score:
+                    best_score = score
+                    best_match = b_row
+
+            if best_score < threshold:
+                mismatches.append({
+                    'name': f_row['name'],
+                    'dob': f_row['dob'],
+                    'email': f_row['email'],
+                    'finacle_phone': combine_phones(f_row, ['preferredphone', 'smsbankingnumber']),
+                    'basis_match_name': best_match['name'] if best_match is not None else "",
+                    'basis_match_email': best_match['email'] if best_match is not None else "",
+                    'basis_phone': combine_phones(best_match, ['tel_num', 'tel_num_2', 'fax_num', 'mob_num']) if best_match is not None else "",
+                    'match_score': best_score
+                })
+
+        mismatches_df = pd.DataFrame(mismatches)
+
+        st.write("### Mismatched Records", mismatches_df)
+        csv = mismatches_df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Mismatches as CSV", csv, "bio_mismatches.csv", "text/csv")
